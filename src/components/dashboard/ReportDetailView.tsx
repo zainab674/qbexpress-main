@@ -239,29 +239,44 @@ export const ReportDetailView = ({ report }: { report: Report }) => {
                     <CardTitle className="text-sm font-bold">Data Preview</CardTitle>
                 </CardHeader>
                 <CardContent className="p-0">
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-xs text-left">
-                            <thead className="bg-slate-50 border-b">
-                                <tr>
-                                    {headers.map((header) => (
-                                        <th key={header} className="px-4 py-3 font-bold text-gray-500 whitespace-nowrap uppercase tracking-wider">
-                                            {header}
-                                        </th>
-                                    ))}
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y divide-gray-100">
-                                {(isFinancial ? data.filter(d => d.item === selectedItem) : data).slice(0, 10).map((row, i) => (
-                                    <tr key={i} className="hover:bg-gray-50 transition-colors">
-                                        {headers.map((header) => (
-                                            <td key={`${i}-${header}`} className="px-4 py-3 whitespace-nowrap text-gray-700">
-                                                {typeof row[header] === 'number' ? row[header].toLocaleString(undefined, { minimumFractionDigits: 2 }) : row[header]}
-                                            </td>
-                                        ))}
+                    <div className="overflow-x-auto max-h-[600px] overflow-y-auto border-t">
+                        <table className="w-full text-[11px] text-left border-collapse">
+                            <tbody>
+                                {(report.data[activeSheet] || []).slice(0, 200).map((row: any[], i: number) => (
+                                    <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50 transition-all group">
+                                        <td className="p-1 px-2 text-[9px] bg-slate-50 text-slate-400 font-mono border-r border-slate-200 text-center select-none sticky left-0 z-10 w-8">
+                                            {i + 1}
+                                        </td>
+                                        {row.map((cell: any, j: number) => {
+                                            const isNumber = typeof cell === 'number';
+                                            const isActuallyEmpty = cell === null || cell === undefined || String(cell).trim() === '';
+
+                                            return (
+                                                <td
+                                                    key={j}
+                                                    className={`p-2.5 px-4 whitespace-nowrap border-r border-slate-50 last:border-r-0 ${isNumber ? 'text-right font-mono text-emerald-700 font-semibold' : 'text-slate-600 font-medium'
+                                                        } ${isActuallyEmpty ? 'bg-slate-50/10' : ''}`}
+                                                >
+                                                    {isNumber
+                                                        ? cell.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                                        : String(cell || '')}
+                                                </td>
+                                            );
+                                        })}
                                     </tr>
                                 ))}
                             </tbody>
                         </table>
+                        {(!report.data[activeSheet] || report.data[activeSheet].length === 0) && (
+                            <div className="p-12 text-center text-slate-400">
+                                No report data found for this sheet.
+                            </div>
+                        )}
+                        {report.data[activeSheet]?.length > 200 && (
+                            <div className="p-3 text-center text-[10px] text-muted-foreground bg-slate-50/30 border-t border-slate-100 uppercase tracking-widest font-bold">
+                                Showing first 200 rows of {report.data[activeSheet].length} total
+                            </div>
+                        )}
                     </div>
                 </CardContent>
             </Card>

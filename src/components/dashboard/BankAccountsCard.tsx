@@ -2,16 +2,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Info, ChevronDown, Settings, MoreVertical, CreditCard } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
+
 export const BankAccountsCard = ({
     accounts: accountData,
     bankAccounts: neoAccounts,
     balanceSheet,
-    reviewTransactions
+    reviewTransactions,
+    period = 'today',
+    onPeriodChange
 }: {
     accounts?: any[],
     bankAccounts?: any[],
     balanceSheet?: any,
-    reviewTransactions?: any
+    reviewTransactions?: any,
+    period?: PeriodKey,
+    onPeriodChange?: (period: PeriodKey) => void
 }) => {
     const navigate = useNavigate();
 
@@ -53,13 +60,17 @@ export const BankAccountsCard = ({
                 <div>
                     <CardTitle className="text-[12px] font-bold text-gray-700 uppercase tracking-wide">BANK ACCOUNTS</CardTitle>
                 </div>
-                <div className="text-[11px] text-gray-500 font-medium">
-                    As of today
-                </div>
+                {onPeriodChange && (
+                    <PeriodSelector
+                        currentPeriod={period}
+                        onPeriodChange={onPeriodChange}
+                        availablePeriods={['today', 'lastMonth', 'lastQuarter', 'lastYear']}
+                    />
+                )}
             </CardHeader>
             <CardContent className="flex-1 px-4">
                 <div className="space-y-1 mb-6">
-                    <div className="text-[12px] text-gray-500">Today's bank balance</div>
+                    <div className="text-[12px] text-gray-500">{PERIODS[period]} bank balance</div>
                     <div className="flex items-center gap-2">
                         <div className="text-3xl font-bold font-sans tracking-tight text-gray-800">
                             {totalBankBalance < 0 ? '-' : ''}${Math.abs(totalBankBalance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}

@@ -28,6 +28,8 @@ const AVAILABLE_WIDGETS: WidgetInfo[] = [
     { id: 'arAging', label: 'Accounts receivable' },
     { id: 'apAging', label: 'Accounts Payable' },
     { id: 'accountDetails', label: 'Account Details' },
+    { id: 'companyProfile', label: 'Company Profile' },
+    { id: 'reports', label: 'Uploaded Reports' },
 ];
 
 interface WidgetSelectionDialogProps {

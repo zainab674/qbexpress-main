@@ -55,6 +55,13 @@ interface Shortcut {
     groupName: string;
 }
 
+interface GroupData {
+    name: string;
+    fullPath: string;
+    shortcuts: Shortcut[];
+    subfolders: Record<string, GroupData>;
+}
+
 const sidebarItems = [
     { icon: LayoutDashboard, label: "Business overview", path: "/dashboard" },
 
@@ -70,7 +77,7 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
     const [reports, setReports] = useState<Report[]>([]);
     const [shortcuts, setShortcuts] = useState<Shortcut[]>([]);
     const [isShortcutsOpen, setIsShortcutsOpen] = useState(true);
-    const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<string[]>(["General", "Finance", "Communication", "Finance/Banks"]);
     const [isAddShortcutOpen, setIsAddShortcutOpen] = useState(false);
     const [isCreatingNewGroup, setIsCreatingNewGroup] = useState(false);
     const [newShortcut, setNewShortcut] = useState({ name: "", url: "", groupName: "" });
@@ -167,12 +174,114 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
         );
     };
 
-    const groupedShortcuts = shortcuts.reduce((acc, curr) => {
-        const group = curr.groupName || 'General';
-        if (!acc[group]) acc[group] = [];
-        acc[group].push(curr);
-        return acc;
-    }, {} as Record<string, Shortcut[]>);
+    const buildTree = (shortcuts: Shortcut[]): Record<string, GroupData> => {
+        const tree: Record<string, GroupData> = {
+            "General": { name: "General", fullPath: "General", shortcuts: [], subfolders: {} },
+            "Finance": {
+                name: "Finance",
+                fullPath: "Finance",
+                shortcuts: [],
+                subfolders: {
+                    "Banks": { name: "Banks", fullPath: "Finance/Banks", shortcuts: [], subfolders: {} }
+                }
+            },
+            "Communication": { name: "Communication", fullPath: "Communication", shortcuts: [], subfolders: {} }
+        };
+
+        shortcuts.forEach(s => {
+            const path = (s.groupName || "General").split('/');
+            let currentLevel = tree;
+            let currentPath = "";
+
+            path.forEach((part, index) => {
+                currentPath = currentPath ? `${currentPath}/${part}` : part;
+                if (!currentLevel[part]) {
+                    currentLevel[part] = { name: part, fullPath: currentPath, shortcuts: [], subfolders: {} };
+                }
+
+                if (index === path.length - 1) {
+                    currentLevel[part].shortcuts.push(s);
+                }
+                currentLevel = currentLevel[part].subfolders;
+            });
+        });
+
+        return tree;
+    };
+
+    const groupedShortcuts = buildTree(shortcuts);
+
+    const SidebarFolderView = ({ group, depth = 0 }: { group: GroupData, depth?: number }) => {
+        const isExpanded = expandedGroups.includes(group.fullPath);
+        const hasContent = group.shortcuts.length > 0 || Object.keys(group.subfolders).length > 0;
+
+        if (!hasContent && !["General", "Finance", "Communication", "Finance/Banks"].includes(group.fullPath)) {
+            return null;
+        }
+
+        return (
+            <div className="space-y-1">
+                <button
+                    onClick={() => toggleGroup(group.fullPath)}
+                    className={cn(
+                        "w-full flex items-center gap-2 py-2 text-xs font-bold text-white uppercase tracking-widest hover:text-white transition-colors",
+                        depth === 0 ? "px-6" : `pl-${6 + (depth * 4)} pr-6`
+                    )}
+                >
+                    <ChevronDown size={12} className={cn("text-white transition-transform", !isExpanded && "-rotate-90")} />
+                    {group.name}
+                </button>
+
+                {isExpanded && (
+                    <div className="space-y-0.5">
+                        {group.shortcuts.length > 0 && (
+                            <ul className="space-y-0.5">
+                                {group.shortcuts.sort((a, b) => a.name.localeCompare(b.name)).map((shortcut) => (
+                                    <li key={shortcut._id} className="group px-2">
+                                        <a
+                                            href={shortcut.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className={cn(
+                                                "flex items-center justify-between py-2 rounded-md hover:bg-white/10 transition-colors",
+                                                depth === 0 ? "px-6" : `pl-${10 + (depth * 4)} pr-6`
+                                            )}
+                                        >
+                                            <div className="flex items-center gap-4 overflow-hidden">
+                                                <div className="w-6 h-6 rounded bg-white/10 flex items-center justify-center shrink-0">
+                                                    <img
+                                                        src={`https://www.google.com/s2/favicons?domain=${new URL(shortcut.url).hostname}&sz=32`}
+                                                        alt=""
+                                                        className="w-4 h-4 object-contain opacity-100"
+                                                        onError={(e) => { (e.target as HTMLImageElement).src = ''; (e.target as HTMLImageElement).className = 'hidden' }}
+                                                    />
+                                                    <Globe className="w-4 h-4 text-white hidden only-child:block" size={14} />
+                                                </div>
+                                                <span className="text-sm font-medium text-white/90 group-hover:text-white truncate">{shortcut.name}</span>
+                                            </div>
+                                            <button
+                                                onClick={(e) => handleDeleteShortcut(shortcut._id, e)}
+                                                className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all"
+                                            >
+                                                <X size={12} />
+                                            </button>
+                                        </a>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        {Object.values(group.subfolders).length > 0 && (
+                            <div className="space-y-1">
+                                {Object.values(group.subfolders).map(sub => (
+                                    <SidebarFolderView key={sub.fullPath} group={sub} depth={depth + 1} />
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     const handleOverviewClick = (e: React.MouseEvent) => {
         if (onReportSelect) {
@@ -363,11 +472,14 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
                                                         </SelectTrigger>
                                                         <SelectContent className="bg-[#2d2e33] border-white/10 text-white">
                                                             <SelectItem value="General" className="py-3 px-6 text-lg">General</SelectItem>
+                                                            <SelectItem value="Finance" className="py-3 px-6 text-lg">Finance</SelectItem>
+                                                            <SelectItem value="Finance/Banks" className="py-3 px-6 text-lg">Finance / Banks</SelectItem>
+                                                            <SelectItem value="Communication" className="py-3 px-6 text-lg">Communication</SelectItem>
                                                             {Array.from(new Set(shortcuts.map(s => s.groupName)))
-                                                                .filter(group => group && group !== "General")
+                                                                .filter(group => group && !["General", "Finance", "Finance/Banks", "Communication"].includes(group))
                                                                 .map(group => (
                                                                     <SelectItem key={group} value={group} className="py-3 px-6 text-lg">
-                                                                        {group}
+                                                                        {group.replace(/\//g, ' / ')}
                                                                     </SelectItem>
                                                                 ))
                                                             }
@@ -391,52 +503,10 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
 
                         {isShortcutsOpen && !isCollapsed && (
                             <div className="space-y-4 px-2">
-                                {Object.entries(groupedShortcuts).map(([groupName, groupItems]) => (
-                                    <div key={groupName} className="space-y-1">
-                                        <button
-                                            onClick={() => toggleGroup(groupName)}
-                                            className="w-full flex items-center gap-2 px-6 py-2 text-xs font-bold text-white uppercase tracking-widest hover:text-white transition-colors"
-                                        >
-                                            <ChevronDown size={12} className={cn("text-white transition-transform", !expandedGroups.includes(groupName) && "-rotate-90")} />
-                                            {groupName}
-                                        </button>
-
-                                        {expandedGroups.includes(groupName) && (
-                                            <ul className="space-y-0.5">
-                                                {groupItems.map((shortcut) => (
-                                                    <li key={shortcut._id} className="group px-2">
-                                                        <a
-                                                            href={shortcut.url}
-                                                            target="_blank"
-                                                            rel="noopener noreferrer"
-                                                            className="flex items-center justify-between px-6 py-2 rounded-md hover:bg-white/10 transition-colors"
-                                                        >
-                                                            <div className="flex items-center gap-4 overflow-hidden">
-                                                                <div className="w-6 h-6 rounded bg-white/10 flex items-center justify-center shrink-0">
-                                                                    <img
-                                                                        src={`https://www.google.com/s2/favicons?domain=${new URL(shortcut.url).hostname}&sz=32`}
-                                                                        alt=""
-                                                                        className="w-4 h-4 object-contain opacity-100"
-                                                                        onError={(e) => { (e.target as HTMLImageElement).src = ''; (e.target as HTMLImageElement).className = 'hidden' }}
-                                                                    />
-                                                                    <Globe className="w-4 h-4 text-white hidden only-child:block" size={14} />
-                                                                </div>
-                                                                <span className="text-sm font-medium text-white/90 group-hover:text-white truncate">{shortcut.name}</span>
-                                                            </div>
-                                                            <button
-                                                                onClick={(e) => handleDeleteShortcut(shortcut._id, e)}
-                                                                className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all"
-                                                            >
-                                                                <X size={12} />
-                                                            </button>
-                                                        </a>
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        )}
-                                    </div>
+                                {Object.values(groupedShortcuts).map((group) => (
+                                    <SidebarFolderView key={group.fullPath} group={group} />
                                 ))}
-                                {shortcuts.length === 0 && (
+                                {shortcuts.length === 0 && Object.values(groupedShortcuts).every(g => g.shortcuts.length === 0 && Object.keys(g.subfolders).length === 0) && (
                                     <div className="px-8 py-2 text-[10px] text-white/20 italic">No shortcuts added</div>
                                 )}
                             </div>

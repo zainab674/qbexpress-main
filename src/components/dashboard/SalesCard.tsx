@@ -13,13 +13,23 @@ import {
 } from "recharts";
 
 
-export const SalesCard = ({ data }: { data?: any }) => {
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
+
+export const SalesCard = ({
+    data,
+    period = 'thisYear',
+    onPeriodChange
+}: {
+    data?: any;
+    period?: PeriodKey;
+    onPeriodChange?: (period: PeriodKey) => void;
+}) => {
     const navigate = useNavigate();
 
     // Default static data
     let chartData: any[] = [];
     let latestTotal = 0;
-    let timeRange = "This year to date";
 
     if (data && data.Columns && data.Columns.Column) {
         const columns = data.Columns.Column;
@@ -63,9 +73,9 @@ export const SalesCard = ({ data }: { data?: any }) => {
         >
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                 <CardTitle className="text-[12px] font-bold text-gray-700 uppercase tracking-wide">SALES</CardTitle>
-                <div className="flex items-center gap-1 text-[11px] text-gray-500 font-medium">
-                    {timeRange} <ChevronDown className="w-4 h-4" />
-                </div>
+                {onPeriodChange && (
+                    <PeriodSelector currentPeriod={period} onPeriodChange={onPeriodChange} />
+                )}
             </CardHeader>
             <CardContent>
                 <div className="mb-4">

@@ -449,33 +449,43 @@ const ReportGraph = () => {
                                     <CardTitle>Data Preview</CardTitle>
                                 </CardHeader>
                                 <CardContent>
-                                    <div className="overflow-x-auto">
-                                        <table className="w-full text-sm text-left">
-                                            <thead className="bg-secondary/50">
-                                                <tr>
-                                                    {headers.map((header) => (
-                                                        <th key={header} className="p-3 font-medium text-muted-foreground whitespace-nowrap">
-                                                            {header}
-                                                        </th>
-                                                    ))}
-                                                </tr>
-                                            </thead>
+                                    <div className="overflow-x-auto rounded-md border border-slate-200 bg-white shadow-sm max-h-[600px] overflow-y-auto">
+                                        <table className="w-full text-xs text-left border-collapse">
                                             <tbody>
-                                                {(isFinancial ? data.filter(d => d.item === selectedItem) : data).slice(0, 10).map((row, i) => (
-                                                    <tr key={i} className="border-b border-border">
-                                                        {headers.map((header) => (
-                                                            <td key={`${i}-${header}`} className="p-3 whitespace-nowrap">
-                                                                {row[header.toLowerCase()]}
-                                                            </td>
-                                                        ))}
+                                                {(allSheetsData[activeSheet] || []).slice(0, 150).map((row: any[], i: number) => (
+                                                    <tr key={i} className="border-b border-slate-50 hover:bg-slate-50/50 transition-all group">
+                                                        <td className="p-1 px-2 text-[9px] bg-slate-50 text-slate-400 font-mono border-r border-slate-200 text-center select-none sticky left-0 z-10">
+                                                            {i + 1}
+                                                        </td>
+                                                        {row.map((cell: any, j: number) => {
+                                                            const isNumber = typeof cell === 'number';
+                                                            const isActuallyEmpty = cell === null || cell === undefined || String(cell).trim() === '';
+
+                                                            return (
+                                                                <td
+                                                                    key={j}
+                                                                    className={`p-3 whitespace-nowrap border-r border-slate-50 last:border-r-0 ${isNumber ? 'text-right font-mono text-emerald-700' : 'text-slate-600 font-medium'
+                                                                        } ${isActuallyEmpty ? 'bg-slate-50/20' : ''}`}
+                                                                >
+                                                                    {isNumber
+                                                                        ? cell.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+                                                                        : String(cell || '')}
+                                                                </td>
+                                                            );
+                                                        })}
                                                     </tr>
                                                 ))}
                                             </tbody>
                                         </table>
-                                        {data.length > 5 && (
-                                            <p className="text-center text-xs text-muted-foreground mt-4">
-                                                Showing up to 10 rows matching the selection.
-                                            </p>
+                                        {(!allSheetsData[activeSheet] || allSheetsData[activeSheet].length === 0) && (
+                                            <div className="p-12 text-center text-slate-400">
+                                                No report data found. Please upload a file to preview.
+                                            </div>
+                                        )}
+                                        {allSheetsData[activeSheet]?.length > 150 && (
+                                            <div className="p-3 text-center text-[10px] text-muted-foreground bg-slate-50/30 border-t border-slate-100 uppercase tracking-widest font-bold">
+                                                Showing first 150 rows of {allSheetsData[activeSheet].length} total
+                                            </div>
                                         )}
                                     </div>
                                 </CardContent>

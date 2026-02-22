@@ -24,7 +24,24 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 
-export const CashFlowCard = ({ data, cashFlow, balanceSheet, accounts: accountData }: { data?: any, cashFlow?: any, balanceSheet?: any, accounts?: any[] }) => {
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
+
+export const CashFlowCard = ({
+    data,
+    cashFlow,
+    balanceSheet,
+    accounts: accountData,
+    period = 'last30Days',
+    onPeriodChange
+}: {
+    data?: any,
+    cashFlow?: any,
+    balanceSheet?: any,
+    accounts?: any[],
+    period?: PeriodKey,
+    onPeriodChange?: (period: PeriodKey) => void
+}) => {
     const navigate = useNavigate();
     const [view, setView] = useState<"balance" | "money">("balance");
 
@@ -103,16 +120,9 @@ export const CashFlowCard = ({ data, cashFlow, balanceSheet, accounts: accountDa
                     </div>
                 </div>
                 <div className="flex items-center gap-2">
-                    <Select defaultValue="12">
-                        <SelectTrigger className="h-8 border-none bg-transparent hover:bg-gray-50 text-xs font-medium text-gray-600 focus:ring-0 gap-1 px-2">
-                            <SelectValue placeholder="Timeframe" />
-                        </SelectTrigger>
-                        <SelectContent>
-                            <SelectItem value="12">12 months</SelectItem>
-                            <SelectItem value="6">6 months</SelectItem>
-                            <SelectItem value="3">3 months</SelectItem>
-                        </SelectContent>
-                    </Select>
+                    {onPeriodChange && (
+                        <PeriodSelector currentPeriod={period} onPeriodChange={onPeriodChange} />
+                    )}
                 </div>
             </CardHeader>
             <CardContent className="px-6 pb-6 pt-2">

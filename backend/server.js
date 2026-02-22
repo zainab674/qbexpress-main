@@ -14,14 +14,6 @@ const app = express();
 app.use(express.json({ limit: '50mb' }));
 app.use(cors());
 
-// Initialize QuickBooks OAuth client
-const oauthClient = new OAuthClient({
-    clientId: process.env.CLIENT_ID,
-    clientSecret: process.env.CLIENT_SECRET,
-    environment: process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox', // Use 'sandbox' or 'production'
-    redirectUri: process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:5000/api/quickbooks/callback'
-});
-
 // Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI)
     .then(() => console.log('MongoDB connected'))
@@ -187,12 +179,87 @@ app.put('/api/users/:userId/widgets', async (req, res) => {
     }
 });
 
+// Helper to get a configured QuickBooks client and handle token refresh with locking
+const refreshPromises = new Map();
+
+async function getQuickBooksClient(userId) {
+    // If a refresh is already in progress for this user, return the existing promise
+    if (refreshPromises.has(userId)) {
+        console.log(`Waiting for existing refresh for user ${userId}...`);
+        return refreshPromises.get(userId);
+    }
+
+    const refreshTask = async () => {
+        const user = await User.findById(userId);
+        if (!user) throw new Error('User not found');
+        if (!user.qbConnected) throw new Error('User not connected to QuickBooks');
+
+        const client = new OAuthClient({
+            clientId: process.env.CLIENT_ID,
+            clientSecret: process.env.CLIENT_SECRET,
+            environment: process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox',
+            redirectUri: process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:5000/api/quickbooks/callback'
+        });
+
+        client.setToken({
+            access_token: user.qbAccessToken,
+            refresh_token: user.qbRefreshToken,
+            realmId: user.qbRealmId,
+            expires_in: Math.floor((new Date(user.qbTokenExpiry) - Date.now()) / 1000),
+            x_refresh_token_expires_in: 8640000 // 100 days
+        });
+
+        if (client.isAccessTokenValid()) {
+            return { client, user };
+        }
+
+        console.log(`Refreshing QuickBooks token for user ${userId}...`);
+        try {
+            const authResponse = await client.refresh();
+            const { access_token, refresh_token, expires_in } = authResponse.token;
+
+            const updatedUser = await User.findByIdAndUpdate(userId, {
+                qbAccessToken: access_token,
+                qbRefreshToken: refresh_token,
+                qbTokenExpiry: new Date(Date.now() + expires_in * 1000),
+                qbConnected: true
+            }, { new: true });
+
+            console.log(`Token refreshed successfully for user ${userId}`);
+            return { client, user: updatedUser };
+        } catch (error) {
+            console.error(`Error refreshing token for user ${userId}:`, error.message);
+            if (error.message?.includes('Refresh token is invalid')) {
+                await User.findByIdAndUpdate(userId, { qbConnected: false });
+            }
+            throw error;
+        }
+    };
+
+    const promise = refreshTask();
+    refreshPromises.set(userId, promise);
+
+    try {
+        return await promise;
+    } finally {
+        refreshPromises.delete(userId);
+    }
+}
+
 // 4. QuickBooks OAuth Routes
 
 // 4a. Authentication Route
 app.get('/api/quickbooks/auth', (req, res) => {
     const { userId } = req.query;
-    const authUri = oauthClient.authorizeUri({
+    // Use a fresh client instance for auth
+    const client = new OAuthClient({
+        clientId: process.env.CLIENT_ID,
+        clientSecret: process.env.CLIENT_SECRET,
+        environment: process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox',
+        redirectUri: process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:5000/api/quickbooks/callback'
+    });
+
+    const authUri = client.authorizeUri({
         scope: [OAuthClient.scopes.Accounting, OAuthClient.scopes.OpenId],
         state: userId || 'testState',
     });
@@ -202,16 +269,18 @@ app.get('/api/quickbooks/auth', (req, res) => {
 // 4b. Callback Route
 app.get('/api/quickbooks/callback', async (req, res) => {
     try {
-        const authResponse = await oauthClient.createToken(req.url);
-        const { access_token, refresh_token, expires_in, x_refresh_token_expires_in } = authResponse.token;
+        // Use a fresh client instance for callback
+        const client = new OAuthClient({
+            clientId: process.env.CLIENT_ID,
+            clientSecret: process.env.CLIENT_SECRET,
+            environment: process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox',
+            redirectUri: process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:5000/api/quickbooks/callback'
+        });
+
+        const authResponse = await client.createToken(req.url);
+        const { access_token, refresh_token, expires_in } = authResponse.token;
         const realmId = req.query.realmId;
-
-        // Get userId from state
         const userId = req.query.state;
-
-        // Update user in DB
-        // If we don't have a userId, we might need a different way to associate.
-        // For this task, let's assume the frontend sends the userId in the 'state' parameter.
 
         if (userId) {
             await User.findByIdAndUpdate(userId, {
@@ -223,12 +292,11 @@ app.get('/api/quickbooks/callback', async (req, res) => {
             });
         }
 
-        // Redirect back to frontend
         const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
         res.redirect(`${frontendUrl}/dashboard?status=success`);
     } catch (error) {
         console.error('QuickBooks Callback Error:', error);
-        const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
+        const frontendUrl = process.env.FRONTEND_URL || 'http://frontend:8081'; // Fallback if localhost fails in docker/env
         res.redirect(`${frontendUrl}/dashboard?status=error`);
     }
 });
@@ -246,50 +314,94 @@ app.get('/api/quickbooks/status/:userId', async (req, res) => {
     }
 });
 
-// 4d. Business Overview Data
-app.get('/api/quickbooks/business-overview/:userId', async (req, res) => {
+// 4d. Granular Report / Entity APIs for Detail Pages
+app.get('/api/quickbooks/reports/:reportName/:userId', async (req, res) => {
     try {
-        const user = await User.findById(req.params.userId);
-        if (!user || !user.qbConnected) {
-            return res.status(404).json({ message: 'User not connected to QuickBooks' });
-        }
+        const { client, user } = await getQuickBooksClient(req.params.userId);
+        const realmId = user.qbRealmId;
+        const { reportName } = req.params;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
 
-        // Setup oauthClient with user tokens
-        oauthClient.setToken({
-            access_token: user.qbAccessToken,
-            refresh_token: user.qbRefreshToken,
-            realmId: user.qbRealmId,
-            expires_in: Math.floor((new Date(user.qbTokenExpiry) - Date.now()) / 1000),
-            x_refresh_token_expires_in: 0 // Not strictly needed for refresh check
+        // Filter and pass through relevant query params
+        const allowedParams = ['start_date', 'end_date', 'summarize_column_by', 'accounting_method', 'as_of_date', 'past_due_only', 'minorversion'];
+        const queryParams = new URLSearchParams();
+        Object.keys(req.query).forEach(key => {
+            if (allowedParams.includes(key)) {
+                queryParams.append(key, req.query[key]);
+            }
         });
 
-        // Refresh token if expired
-        if (!oauthClient.isAccessTokenValid()) {
-            try {
-                console.log('Refreshing QuickBooks token...');
-                const authResponse = await oauthClient.refresh();
-                const { access_token, refresh_token, expires_in } = authResponse.token;
+        const url = `${baseUrl}/v3/company/${realmId}/reports/${reportName}${queryParams.toString() ? '?' + queryParams.toString() : ''}`;
 
-                user.qbAccessToken = access_token;
-                user.qbRefreshToken = refresh_token;
-                user.qbTokenExpiry = new Date(Date.now() + expires_in * 1000);
-                await user.save();
-            } catch (refreshError) {
-                console.error('Error refreshing token:', refreshError);
-                if (refreshError.message?.includes('Refresh token is invalid')) {
-                    user.qbConnected = false;
-                    await user.save();
-                    return res.status(401).json({
-                        message: 'QuickBooks authorization expired',
-                        error: 'The Refresh token is invalid, please Authorize again.'
-                    });
-                }
-                throw refreshError;
-            }
-        }
+        console.log(`Fetching specific report ${reportName} for user ${user.email}`);
+        const response = await client.makeApiCall({
+            url,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        res.json(response.json);
+    } catch (error) {
+        console.error(`Error fetching report ${req.params.reportName}:`, error);
+        res.status(500).json({ message: 'Error fetching report', error: error.message });
+    }
+});
+
+app.get('/api/quickbooks/accounts/:userId', async (req, res) => {
+    try {
+        const { client, user } = await getQuickBooksClient(req.params.userId);
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        // Fetch Accounts and Banking Feed in parallel
+        const [accountsResponse, bankingRes] = await Promise.allSettled([
+            client.makeApiCall({
+                url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Account where AccountType in ('Bank', 'Credit Card')`,
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+            }),
+            client.makeApiCall({
+                url: `${baseUrl}/v3/company/${realmId}/banking/accounts?minorversion=75`,
+                method: 'GET',
+                headers: { 'Content-Type': 'application/json' }
+            })
+        ]);
+
+        const ledgerAccounts = accountsResponse.status === 'fulfilled' ? (accountsResponse.value.json?.QueryResponse?.Account || []) : [];
+        const bankingAccounts = bankingRes.status === 'fulfilled' ? (bankingRes.value.json?.accounts || []) : [];
+
+        const bankingMap = {};
+        bankingAccounts.forEach(acc => { bankingMap[acc.qboAccountId] = acc; });
+
+        const mergedAccounts = ledgerAccounts.map(acc => {
+            const feed = bankingMap[acc.Id];
+            return {
+                ...acc,
+                bankBalance: (feed && feed.bankBalance !== undefined) ? feed.bankBalance : (acc.BankBalance || acc.CurrentBalance || 0),
+                qboBalance: acc.CurrentBalance || 0,
+                unmatchedCount: feed ? feed.unmatchedCount : 0,
+                fiName: feed ? feed.fiName : null,
+                connectionType: feed ? feed.connectionType : "DISCONNECTED"
+            };
+        });
+
+        res.json(mergedAccounts);
+    } catch (error) {
+        res.status(500).json({ message: 'Error fetching accounts', error: error.message });
+    }
+});
+
+// 4e. Business Overview Data (Refactored for performance)
+app.get('/api/quickbooks/business-overview/:userId', async (req, res) => {
+    try {
+        const { client, user } = await getQuickBooksClient(req.params.userId);
 
         const realmId = user.qbRealmId;
-        const baseUrl = oauthClient.environment === 'sandbox'
+        const baseUrl = client.environment === 'sandbox'
             ? 'https://sandbox-quickbooks.api.intuit.com'
             : 'https://quickbooks.api.intuit.com';
 
@@ -299,107 +411,72 @@ app.get('/api/quickbooks/business-overview/:userId', async (req, res) => {
         const formatDate = (date) => date.toISOString().split('T')[0];
         const start = formatDate(thirtyDaysAgo);
         const end = formatDate(today);
-
-        const todayFormatted = end;
-        const thirtyDaysAgoFormatted = start;
+        const currentYearStart = formatDate(new Date(today.getFullYear(), 0, 1));
         const oneYearAgoFormatted = formatDate(new Date(Date.now() - 365 * 24 * 60 * 60 * 1000));
 
-        // 1. Fetch Profit and Loss (Last 30 Days) - Dashboard often uses this Month, but keeping 30 days for now or matching start/end
-        const pnLResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/ProfitAndLoss?start_date=${start}&end_date=${end}&summarize_column_by=Month`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
+        console.log(`Fetching business overview for ${user.email} (parallel mode)`);
+
+        // Helper for API calls to use with Promise.all
+        const call = (url) => client.makeApiCall({ url, method: 'GET', headers: { 'Content-Type': 'application/json' } });
+
+        const requests = {
+            pnl: call(`${baseUrl}/v3/company/${realmId}/reports/ProfitAndLoss?start_date=${start}&end_date=${end}&summarize_column_by=Month`),
+            sales: call(`${baseUrl}/v3/company/${realmId}/reports/ProfitAndLoss?start_date=${currentYearStart}&end_date=${end}&summarize_column_by=Month`),
+            cashFlow: call(`${baseUrl}/v3/company/${realmId}/reports/CashFlow?start_date=${start}&end_date=${end}&accounting_method=Cash`),
+            accounts: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from Account where AccountType in ('Bank', 'Credit Card')`),
+            banking: call(`${baseUrl}/v3/company/${realmId}/banking/accounts?minorversion=75`).catch(() => ({ json: { accounts: [] } })),
+            reviewTxns: call(`${baseUrl}/v3/company/${realmId}/reports/TransactionList?txn_status=ForReview&start_date=${start}&end_date=${end}`),
+            balanceSheet: call(`${baseUrl}/v3/company/${realmId}/reports/BalanceSheet?accounting_method=Cash&as_of_date=${end}`),
+            arAging: call(`${baseUrl}/v3/company/${realmId}/reports/AgedReceivableSummary?past_due_only=false`),
+            apAging: call(`${baseUrl}/v3/company/${realmId}/reports/AgedPayableSummary?past_due_only=false`),
+            apAgingDetail: call(`${baseUrl}/v3/company/${realmId}/reports/AgedPayableDetail?past_due_only=false`),
+            arAgingDetail: call(`${baseUrl}/v3/company/${realmId}/reports/AgedReceivableDetail?past_due_only=false`),
+            unpaidInvoices: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from Invoice where Balance > '0' AND TxnDate >= '${oneYearAgoFormatted}'`),
+            recentPayments: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from Payment where TxnDate >= '${start}'`),
+            recentSalesReceipts: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from SalesReceipt where TxnDate >= '${start}'`),
+            allAccounts: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from Account`),
+            recentBillPayments: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from BillPayment where TxnDate >= '${start}'`),
+            recentPurchases: call(`${baseUrl}/v3/company/${realmId}/query?query=select * from Purchase where TxnDate >= '${start}'`),
+            companyInfo: call(`${baseUrl}/v3/company/${realmId}/companyinfo/${realmId}?minorversion=75`)
+        };
+
+        const results = await Promise.allSettled(Object.values(requests));
+        const keys = Object.keys(requests);
+        const data = {};
+
+        results.forEach((res, idx) => {
+            data[keys[idx]] = res.status === 'fulfilled' ? res.value.json : null;
         });
-        const pnlData = pnLResponse.json;
 
-        // 1b. Fetch Sales (Year to Date) - Specifically for the Sales Card
-        const currentYearStart = formatDate(new Date(today.getFullYear(), 0, 1));
-        const salesReportResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/ProfitAndLoss?start_date=${currentYearStart}&end_date=${todayFormatted}&summarize_column_by=Month`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const salesReportData = salesReportResponse.json;
+        // Processing logic (Keep it as it was but mapped from 'data')
+        const pnlData = data.pnl;
+        const salesReportData = data.sales;
+        const cashFlowData = data.cashFlow;
+        const ledgerAccounts = data.accounts?.QueryResponse?.Account || [];
+        const bankingAccounts = data.banking?.accounts || [];
+        const reviewTransactionsData = data.reviewTxns;
 
-
-        // 2. Fetch Cash Flow (Last 30 Days) - Dashboard uses CASH BASIS
-        const cashFlowResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/CashFlow?start_date=${start}&end_date=${end}&accounting_method=Cash`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const cashFlowData = cashFlowResponse.json;
-
-        // 3. Fetch Bank Accounts (using a query)
-        const accountsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Account where AccountType in ('Bank', 'Credit Card')`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const ledgerAccounts = accountsResponse.json?.QueryResponse?.Account || [];
-
-
-        // 3b. Fetch Banking Feed Data (Live Feed) - Try/Catch required as not all companies have this enabled
-        let bankingAccounts = [];
-        try {
-            console.log('Fetching QuickBooks Banking Feed...');
-            const bankingResponse = await oauthClient.makeApiCall({
-                url: `${baseUrl}/v3/company/${realmId}/banking/accounts?minorversion=75`,
-                method: 'GET',
-                headers: { 'Content-Type': 'application/json' }
-            });
-            bankingAccounts = bankingResponse.json?.accounts || [];
-            console.log(`QuickBooks Banking Feed Result: ${bankingAccounts.length} accounts found.`);
-        } catch (bankingErr) {
-            console.warn('QuickBooks Banking feed not available or failed:', bankingErr.message);
-
-        }
-
-        // MOVED FETCH: reviewTransactionsData needs to be available for the fallback logic below
-        const reviewTransactionsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/TransactionList?txn_status=ForReview&start_date=${start}&end_date=${end}`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const reviewTransactionsData = reviewTransactionsResponse.json;
-
-        // Merge Accounting + Banking
         const bankingMap = {};
-        bankingAccounts.forEach(acc => {
-            bankingMap[acc.qboAccountId] = acc;
-        });
+        bankingAccounts.forEach(acc => { bankingMap[acc.qboAccountId] = acc; });
 
-        // 3c. Fallback: Parse TransactionList report for "to review" counts if Banking Feed is empty
         const reportToReviewCounts = {};
         if (bankingAccounts.length === 0 && reviewTransactionsData && reviewTransactionsData.Rows && reviewTransactionsData.Rows.Row) {
-            console.log('Banking feed empty, parsing TransactionList for review counts...');
-            // Find "Account" column index
             const accountColIndex = reviewTransactionsData.Columns?.Column?.findIndex(c => c.ColTitle === 'Account' || c.ColType === 'Account') ?? -1;
-
             if (accountColIndex !== -1) {
-                const rows = reviewTransactionsData.Rows.Row;
-                rows.forEach(row => {
+                reviewTransactionsData.Rows.Row.forEach(row => {
                     if (row.ColData && row.ColData[accountColIndex]) {
                         const accountName = row.ColData[accountColIndex].value;
-                        if (accountName) {
-                            reportToReviewCounts[accountName] = (reportToReviewCounts[accountName] || 0) + 1;
-                        }
+                        if (accountName) reportToReviewCounts[accountName] = (reportToReviewCounts[accountName] || 0) + 1;
                     }
                 });
             }
-            console.log('Counts found via report fallback:', reportToReviewCounts);
         }
 
         const mergedAccounts = ledgerAccounts.map(acc => {
             const feed = bankingMap[acc.Id];
-            // Use feed count or report count fallback
-            const unmatchedCount = (feed && feed.unmatchedCount !== undefined)
-                ? feed.unmatchedCount
-                : (reportToReviewCounts[acc.Name] || 0);
-
+            const unmatchedCount = (feed && feed.unmatchedCount !== undefined) ? feed.unmatchedCount : (reportToReviewCounts[acc.Name] || 0);
             return {
                 ...acc,
-                // Unified fields for frontend
                 bankBalance: (feed && feed.bankBalance !== undefined) ? feed.bankBalance : (acc.BankBalance || acc.CurrentBalance || 0),
                 qboBalance: acc.CurrentBalance || 0,
                 unmatchedCount: unmatchedCount,
@@ -409,213 +486,91 @@ app.get('/api/quickbooks/business-overview/:userId', async (req, res) => {
             };
         });
 
-        // 4. Fetch BalanceSheet (Today's snapshot, CASH basis for bank widget alignment)
-        const balanceSheetResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/BalanceSheet?accounting_method=Cash&as_of_date=${todayFormatted}`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const balanceSheetData = balanceSheetResponse.json;
-
-        // 5. Fetch Aged Receivable Summary (The source of truth for dashboard Unpaid/Overdue)
-        const arAgingResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/AgedReceivableSummary?past_due_only=false`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const arAgingData = arAgingResponse.json;
-
-        // 6. Fetch Aged Payable Summary
-        const apAgingResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/AgedPayableSummary?past_due_only=false`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const apAgingData = apAgingResponse.json;
-
-        // 6b. Fetch Aged Payable Detail (Added as requested)
-        const apAgingDetailResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/AgedPayableDetail?past_due_only=false`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const apAgingDetailData = apAgingDetailResponse.json;
-
-        // 6c. Fetch Aged Receivable Detail (Symmetric addition)
-        const arAgingDetailResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/reports/AgedReceivableDetail?past_due_only=false`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const arAgingDetailData = arAgingDetailResponse.json;
-
-        // 7. Fetch Invoices for status (Unpaid part) - Keeping for reference, but using Aging report for totals
-        const invoicesResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Invoice where Balance > '0' AND TxnDate >= '${oneYearAgoFormatted}'`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const unpaidInvoices = invoicesResponse.json?.QueryResponse?.Invoice || [];
-
-        // 8. Fetch Payments and SalesReceipts for status (Paid part)
-        const paymentsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Payment where TxnDate >= '${thirtyDaysAgoFormatted}'`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const recentPayments = paymentsResponse.json?.QueryResponse?.Payment || [];
-
-        const salesReceiptsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from SalesReceipt where TxnDate >= '${thirtyDaysAgoFormatted}'`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const recentSalesReceipts = salesReceiptsResponse.json?.QueryResponse?.SalesReceipt || [];
-
-        const undepositedAccountsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Account`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const allAccounts = undepositedAccountsResponse.json?.QueryResponse?.Account || [];
-        const undepositedAccounts = allAccounts.filter(a =>
-            a.AccountSubType === 'UndepositedFunds' ||
-            a.Name === 'Undeposited Funds' ||
-            a.Name === 'Payments to deposit' ||
-            (a.AccountType === 'Other Current Asset' && a.Name.includes('Undeposited'))
+        const undepositedAccounts = (data.allAccounts?.QueryResponse?.Account || []).filter(a =>
+            a.AccountSubType === 'UndepositedFunds' || a.Name.includes('Undeposited') || a.Name.includes('Payments to deposit')
         );
-
         const undepositedAccountIds = undepositedAccounts.map(a => a.Id);
 
-        const invoiceStatus = {
-            unpaidAmount: 0,
-            overdueAmount: 0,
-            notDueYetAmount: 0,
-            paidAmount: 0,
-            depositedAmount: 0,
-            notDepositedAmount: 0
-        };
+        const invoiceStatus = { unpaidAmount: 0, overdueAmount: 0, notDueYetAmount: 0, paidAmount: 0, depositedAmount: 0, notDepositedAmount: 0 };
+        const arAgingData = data.arAging;
 
-        // Process Unpaid from Aging Report (Single source of truth for dashboard)
         if (arAgingData && arAgingData.Rows && arAgingData.Rows.Row) {
-            // Find Summary Row (Total)
-            const summaryRow = arAgingData.Rows.Row.find(r => r.id === 'TOTAL' || (r.Summary && r.Summary.ColData && r.Summary.ColData[0].value === 'Total'));
-            if (summaryRow && summaryRow.Summary && summaryRow.Summary.ColData) {
+            const summaryRow = arAgingData.Rows.Row.find(r =>
+                r.id === 'TOTAL' ||
+                (r.Summary && r.Summary.ColData &&
+                    (r.Summary.ColData[0].value?.toLowerCase() === 'total' || r.Summary.ColData[0].value?.toLowerCase().includes('total')))
+            );
+
+            if (summaryRow?.Summary?.ColData) {
                 const cols = summaryRow.Summary.ColData;
-                // Cols: [Name, Current, 1-30, 31-60, 61-90, 91 and over, Total]
-                if (cols.length >= 7) {
-                    const currentAmt = parseFloat(cols[1].value || 0);
-                    const totalAmt = parseFloat(cols[cols.length - 1].value || 0);
-                    const overdueAmt = totalAmt - currentAmt;
+                const columns = arAgingData.Columns?.Column || [];
+                const findColIdx = (text) => columns.findIndex(c => c.ColTitle?.toLowerCase().includes(text.toLowerCase()));
 
-                    invoiceStatus.unpaidAmount = totalAmt;
-                    invoiceStatus.notDueYetAmount = currentAmt;
-                    invoiceStatus.overdueAmount = overdueAmt;
-                }
+                const currentIdx = findColIdx("current");
+                const totalIdx = findColIdx("total") !== -1 ? findColIdx("total") : cols.length - 1;
+
+                const totalAmt = parseFloat(cols[totalIdx]?.value || 0);
+                const currentAmt = currentIdx !== -1 ? parseFloat(cols[currentIdx]?.value || 0) : 0;
+
+                invoiceStatus.unpaidAmount = totalAmt;
+                invoiceStatus.notDueYetAmount = currentAmt;
+                invoiceStatus.overdueAmount = totalAmt - currentAmt;
             }
-        }
-
-        // Fallback to manual if aging report failed or returned zero (unexpected)
-        if (invoiceStatus.unpaidAmount === 0 && unpaidInvoices.length > 0) {
-            unpaidInvoices.forEach(inv => {
-                const balance = parseFloat(inv.Balance || 0);
-                const dueDate = inv.DueDate;
-                invoiceStatus.unpaidAmount += balance;
-                if (dueDate && dueDate < todayFormatted) {
-                    invoiceStatus.overdueAmount += balance;
-                } else {
-                    invoiceStatus.notDueYetAmount += balance;
-                }
-            });
         }
 
         const processPaidItem = (item) => {
             const amount = parseFloat(item.TotalAmt || 0);
             invoiceStatus.paidAmount += amount;
-
-            const depositTo = item.DepositToAccountRef?.value;
-            // If it goes to an undeposited funds account, it's not deposited
-            if (undepositedAccountIds.includes(depositTo)) {
-                invoiceStatus.notDepositedAmount += amount;
-            } else {
-                // If it goes directly to a bank account or any other account, consider it deposited
-                invoiceStatus.depositedAmount += amount;
-            }
+            if (undepositedAccountIds.includes(item.DepositToAccountRef?.value)) invoiceStatus.notDepositedAmount += amount;
+            else invoiceStatus.depositedAmount += amount;
         };
+        (data.recentPayments?.QueryResponse?.Payment || []).forEach(processPaidItem);
+        (data.recentSalesReceipts?.QueryResponse?.SalesReceipt || []).forEach(processPaidItem);
 
-        recentPayments.forEach(processPaidItem);
-        recentSalesReceipts.forEach(processPaidItem);
-
-
-        const billPaymentsResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from BillPayment where TxnDate >= '${thirtyDaysAgoFormatted}'`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const recentBillPayments = billPaymentsResponse.json?.QueryResponse?.BillPayment || [];
-
-        const vendorPurchasesResponse = await oauthClient.makeApiCall({
-            url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Purchase where TxnDate >= '${thirtyDaysAgoFormatted}'`,
-            method: 'GET',
-            headers: { 'Content-Type': 'application/json' }
-        });
-        const recentPurchases = vendorPurchasesResponse.json?.QueryResponse?.Purchase || [];
-
-        const vendorStatus = {
-            unpaidAmount: 0,
-            overdueAmount: 0,
-            notDueYetAmount: 0,
-            paidAmount: 0
-        };
-
-        // Process Unpaid from AP Aging Report
+        const vendorStatus = { unpaidAmount: 0, overdueAmount: 0, notDueYetAmount: 0, paidAmount: 0 };
+        const apAgingData = data.apAging;
         if (apAgingData && apAgingData.Rows && apAgingData.Rows.Row) {
-            const summaryRow = apAgingData.Rows.Row.find(r => r.id === 'TOTAL' || (r.Summary && r.Summary.ColData && r.Summary.ColData[0].value === 'Total'));
-            if (summaryRow && summaryRow.Summary && summaryRow.Summary.ColData) {
-                const cols = summaryRow.Summary.ColData;
-                if (cols.length >= 7) {
-                    const currentAmt = parseFloat(cols[1].value || 0);
-                    const totalAmt = parseFloat(cols[cols.length - 1].value || 0);
-                    const overdueAmt = totalAmt - currentAmt;
+            const summaryRow = apAgingData.Rows.Row.find(r =>
+                r.id === 'TOTAL' ||
+                (r.Summary && r.Summary.ColData &&
+                    (r.Summary.ColData[0].value?.toLowerCase() === 'total' || r.Summary.ColData[0].value?.toLowerCase().includes('total')))
+            );
 
-                    vendorStatus.unpaidAmount = totalAmt;
-                    vendorStatus.notDueYetAmount = currentAmt;
-                    vendorStatus.overdueAmount = overdueAmt;
-                }
+            if (summaryRow?.Summary?.ColData) {
+                const cols = summaryRow.Summary.ColData;
+                const columns = apAgingData.Columns?.Column || [];
+                const findColIdx = (text) => columns.findIndex(c => c.ColTitle?.toLowerCase().includes(text.toLowerCase()));
+
+                const currentIdx = findColIdx("current");
+                const totalIdx = findColIdx("total") !== -1 ? findColIdx("total") : cols.length - 1;
+
+                const totalAmt = parseFloat(cols[totalIdx]?.value || 0);
+                const currentAmt = currentIdx !== -1 ? parseFloat(cols[currentIdx]?.value || 0) : 0;
+
+                vendorStatus.unpaidAmount = totalAmt;
+                vendorStatus.notDueYetAmount = currentAmt;
+                vendorStatus.overdueAmount = totalAmt - currentAmt;
             }
         }
-
-        recentBillPayments.forEach(p => {
-            vendorStatus.paidAmount += parseFloat(p.TotalAmt || 0);
-        });
-        recentPurchases.forEach(p => {
-            // Purchases are often direct payments
-            vendorStatus.paidAmount += parseFloat(p.TotalAmt || 0);
-        });
-
-        console.log('Bill Status Calculation Summary:', {
-            billPaymentsCount: recentBillPayments.length,
-            purchasesCount: recentPurchases.length,
-            finalStatus: vendorStatus
-        });
-
+        (data.recentBillPayments?.QueryResponse?.BillPayment || []).forEach(p => { vendorStatus.paidAmount += parseFloat(p.TotalAmt || 0); });
+        (data.recentPurchases?.QueryResponse?.Purchase || []).forEach(p => { vendorStatus.paidAmount += parseFloat(p.TotalAmt || 0); });
 
         res.json({
             profitAndLoss: pnlData,
             salesReport: salesReportData,
             cashFlow: cashFlowData,
-
             accounts: mergedAccounts,
-            balanceSheet: balanceSheetData,
+            balanceSheet: data.balanceSheet,
             reviewTransactions: reviewTransactionsData,
             invoiceStatus: invoiceStatus,
             customerStatus: invoiceStatus,
             vendorStatus: vendorStatus,
             arAging: arAgingData,
-
             apAging: apAgingData,
-            arAgingDetail: arAgingDetailData,
-            apAgingDetail: apAgingDetailData,
+            arAgingDetail: data.arAgingDetail,
+            apAgingDetail: data.apAgingDetail,
+            companyInfo: data.companyInfo?.CompanyInfo,
+            allAccounts: data.allAccounts?.QueryResponse?.Account || [],
             lastUpdated: new Date()
         });
     } catch (error) {
@@ -624,44 +579,150 @@ app.get('/api/quickbooks/business-overview/:userId', async (req, res) => {
     }
 });
 
-// 4e. Individual Account Detail
-app.get('/api/quickbooks/account/:userId/:accountId', async (req, res) => {
+// 4f. Granular Dashboard Endpoints
+app.get('/api/quickbooks/dashboard/customer-status/:userId', async (req, res) => {
     try {
-        const { userId, accountId } = req.params;
-        const user = await User.findById(userId);
-        if (!user || !user.qbConnected) {
-            return res.status(404).json({ message: 'User not connected to QuickBooks' });
-        }
-
-        // Setup oauthClient
-        oauthClient.setToken({
-            access_token: user.qbAccessToken,
-            refresh_token: user.qbRefreshToken,
-            realmId: user.qbRealmId,
-            expires_in: Math.floor((new Date(user.qbTokenExpiry) - Date.now()) / 1000)
-        });
-
-        // Refresh token if needed
-        if (!oauthClient.isAccessTokenValid()) {
-            try {
-                const authResponse = await oauthClient.refresh();
-                const { access_token, refresh_token, expires_in } = authResponse.token;
-                user.qbAccessToken = access_token;
-                user.qbRefreshToken = refresh_token;
-                user.qbTokenExpiry = new Date(Date.now() + expires_in * 1000);
-                await user.save();
-            } catch (refreshError) {
-                console.error('Error refreshing token:', refreshError);
-                return res.status(401).json({ message: 'QuickBooks authorization expired' });
-            }
-        }
-
+        const { client, user } = await getQuickBooksClient(req.params.userId);
         const realmId = user.qbRealmId;
-        const baseUrl = oauthClient.environment === 'sandbox'
+        const baseUrl = client.environment === 'sandbox'
             ? 'https://sandbox-quickbooks.api.intuit.com'
             : 'https://quickbooks.api.intuit.com';
 
-        const response = await oauthClient.makeApiCall({
+        const today = new Date();
+        const formatDate = (date) => date.toISOString().split('T')[0];
+        const end = formatDate(today);
+        const start = formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+
+        const [arAging, recentPayments, recentSalesReceipts, allAccounts] = await Promise.all([
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/reports/AgedReceivableSummary?past_due_only=false`, method: 'GET' }),
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Payment where TxnDate >= '${start}'`, method: 'GET' }),
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/query?query=select * from SalesReceipt where TxnDate >= '${start}'`, method: 'GET' }),
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Account`, method: 'GET' })
+        ]);
+
+        const arAgingData = arAging.json;
+        const undepositedAccounts = (allAccounts.json?.QueryResponse?.Account || []).filter(a =>
+            a.AccountSubType === 'UndepositedFunds' || a.Name.includes('Undeposited') || a.Name.includes('Payments to deposit')
+        );
+        const undepositedAccountIds = undepositedAccounts.map(a => a.Id);
+
+        const status = { unpaidAmount: 0, overdueAmount: 0, notDueYetAmount: 0, paidAmount: 0, depositedAmount: 0, notDepositedAmount: 0 };
+
+        if (arAgingData && arAgingData.Rows && arAgingData.Rows.Row) {
+            // Find TOTAL row (more robust)
+            const summaryRow = arAgingData.Rows.Row.find(r =>
+                r.id === 'TOTAL' ||
+                (r.Summary && r.Summary.ColData &&
+                    (r.Summary.ColData[0].value?.toLowerCase() === 'total' || r.Summary.ColData[0].value?.toLowerCase().includes('total')))
+            );
+
+            if (summaryRow?.Summary?.ColData) {
+                const cols = summaryRow.Summary.ColData;
+                const columns = arAgingData.Columns?.Column || [];
+
+                const findColIdx = (text) => columns.findIndex(c =>
+                    c.ColTitle?.toLowerCase().includes(text.toLowerCase())
+                );
+
+                const currentIdx = findColIdx("current");
+                const totalIdx = findColIdx("total") !== -1 ? findColIdx("total") : cols.length - 1;
+
+                const totalAmt = parseFloat(cols[totalIdx]?.value || 0);
+                const currentAmt = currentIdx !== -1 ? parseFloat(cols[currentIdx]?.value || 0) : 0;
+
+                status.unpaidAmount = totalAmt;
+                status.notDueYetAmount = currentAmt;
+                status.overdueAmount = totalAmt - currentAmt;
+            }
+        }
+
+        const processPaidItem = (item) => {
+            const amount = parseFloat(item.TotalAmt || 0);
+            status.paidAmount += amount;
+            if (undepositedAccountIds.includes(item.DepositToAccountRef?.value)) status.notDepositedAmount += amount;
+            else status.depositedAmount += amount;
+        };
+        (recentPayments.json?.QueryResponse?.Payment || []).forEach(processPaidItem);
+        (recentSalesReceipts.json?.QueryResponse?.SalesReceipt || []).forEach(processPaidItem);
+
+        res.json(status);
+    } catch (error) {
+        console.error('Error fetching customer status:', error);
+        res.status(500).json({ message: 'Error fetching customer status', error: error.message });
+    }
+});
+
+app.get('/api/quickbooks/dashboard/vendor-status/:userId', async (req, res) => {
+    try {
+        const { client, user } = await getQuickBooksClient(req.params.userId);
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        const today = new Date();
+        const formatDate = (date) => date.toISOString().split('T')[0];
+        const end = formatDate(today);
+        const start = formatDate(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000));
+
+        const [apAging, recentBillPayments, recentPurchases] = await Promise.all([
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/reports/AgedPayableSummary?past_due_only=false`, method: 'GET' }),
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/query?query=select * from BillPayment where TxnDate >= '${start}'`, method: 'GET' }),
+            client.makeApiCall({ url: `${baseUrl}/v3/company/${realmId}/query?query=select * from Purchase where TxnDate >= '${start}'`, method: 'GET' })
+        ]);
+
+        const status = { unpaidAmount: 0, overdueAmount: 0, notDueYetAmount: 0, paidAmount: 0 };
+        const apAgingData = apAging.json;
+
+        if (apAgingData && apAgingData.Rows && apAgingData.Rows.Row) {
+            // Find TOTAL row (more robust)
+            const summaryRow = apAgingData.Rows.Row.find(r =>
+                r.id === 'TOTAL' ||
+                (r.Summary && r.Summary.ColData &&
+                    (r.Summary.ColData[0].value?.toLowerCase() === 'total' || r.Summary.ColData[0].value?.toLowerCase().includes('total')))
+            );
+
+            if (summaryRow?.Summary?.ColData) {
+                const cols = summaryRow.Summary.ColData;
+                const columns = apAgingData.Columns?.Column || [];
+
+                const findColIdx = (text) => columns.findIndex(c =>
+                    c.ColTitle?.toLowerCase().includes(text.toLowerCase())
+                );
+
+                const currentIdx = findColIdx("current");
+                const totalIdx = findColIdx("total") !== -1 ? findColIdx("total") : cols.length - 1;
+
+                const totalAmt = parseFloat(cols[totalIdx]?.value || 0);
+                const currentAmt = currentIdx !== -1 ? parseFloat(cols[currentIdx]?.value || 0) : 0;
+
+                status.unpaidAmount = totalAmt;
+                status.notDueYetAmount = currentAmt;
+                status.overdueAmount = totalAmt - currentAmt;
+            }
+        }
+        (recentBillPayments.json?.QueryResponse?.BillPayment || []).forEach(p => { status.paidAmount += parseFloat(p.TotalAmt || 0); });
+        (recentPurchases.json?.QueryResponse?.Purchase || []).forEach(p => { status.paidAmount += parseFloat(p.TotalAmt || 0); });
+
+        res.json(status);
+    } catch (error) {
+        console.error('Error fetching vendor status:', error);
+        res.status(500).json({ message: 'Error fetching vendor status', error: error.message });
+    }
+});
+
+// 4g. Individual Account Detail
+app.get('/api/quickbooks/account/:userId/:accountId', async (req, res) => {
+    try {
+        const { userId, accountId } = req.params;
+        const { client, user } = await getQuickBooksClient(userId);
+
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        const response = await client.makeApiCall({
             url: `${baseUrl}/v3/company/${realmId}/account/${accountId}?minorversion=75`,
             method: 'GET',
             headers: { 'Content-Type': 'application/json' }
@@ -671,6 +732,94 @@ app.get('/api/quickbooks/account/:userId/:accountId', async (req, res) => {
     } catch (error) {
         console.error('Error fetching account detail:', error);
         res.status(500).json({ message: 'Error fetching account detail', error: error.message });
+    }
+});
+
+// 4h. Customers List API
+app.get('/api/quickbooks/customers/:userId', async (req, res) => {
+    try {
+        const { client, user } = await getQuickBooksClient(req.params.userId);
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        const url = `${baseUrl}/v3/company/${realmId}/query?query=select * from Customer&minorversion=75`;
+
+        console.log(`Fetching customers for user ${user.email}`);
+        const response = await client.makeApiCall({
+            url,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        res.json(response.json?.QueryResponse?.Customer || []);
+    } catch (error) {
+        console.error('Error fetching customers:', error);
+        res.status(500).json({ message: 'Error fetching customers', error: error.message });
+    }
+});
+
+// 4i. Vendors List API
+app.get('/api/quickbooks/vendors/:userId', async (req, res) => {
+    try {
+        const { client, user } = await getQuickBooksClient(req.params.userId);
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        const url = `${baseUrl}/v3/company/${realmId}/query?query=select * from Vendor&minorversion=75`;
+
+        console.log(`Fetching vendors for user ${user.email}`);
+        const response = await client.makeApiCall({
+            url,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        res.json(response.json?.QueryResponse?.Vendor || []);
+    } catch (error) {
+        console.error('Error fetching vendors:', error);
+        res.status(500).json({ message: 'Error fetching vendors', error: error.message });
+    }
+});
+
+// 4g. Company Info
+app.get('/api/quickbooks/company-info/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { client, user } = await getQuickBooksClient(userId);
+
+        const realmId = user.qbRealmId;
+        const baseUrl = client.environment === 'sandbox'
+            ? 'https://sandbox-quickbooks.api.intuit.com'
+            : 'https://quickbooks.api.intuit.com';
+
+        const url = `${baseUrl}/v3/company/${realmId}/companyinfo/${realmId}?minorversion=75`;
+        console.log(`Fetching company info for user ${user.email} (Realm: ${realmId})`);
+
+        const response = await client.makeApiCall({
+            url,
+            method: 'GET',
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (!response || !response.json) {
+            console.error('Empty response or missing JSON from QuickBooks API for company info');
+            return res.status(500).json({ message: 'Empty response from QuickBooks' });
+        }
+
+        const companyInfo = response.json.CompanyInfo;
+        if (!companyInfo) {
+            console.warn(`CompanyInfo object missing in response for user ${user.email}`);
+            return res.json({}); // Return empty object instead of potentially null/undefined
+        }
+
+        res.json(companyInfo);
+    } catch (error) {
+        console.error('Error fetching company info:', error);
+        res.status(500).json({ message: 'Error fetching company info', error: error.message });
     }
 });
 

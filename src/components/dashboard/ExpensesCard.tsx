@@ -10,13 +10,23 @@ import {
     Tooltip
 } from "recharts";
 
-export const ExpensesCard = ({ data }: { data?: any }) => {
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
+
+export const ExpensesCard = ({
+    data,
+    period = 'last30Days',
+    onPeriodChange
+}: {
+    data?: any;
+    period?: PeriodKey;
+    onPeriodChange?: (period: PeriodKey) => void;
+}) => {
     const navigate = useNavigate();
 
     // Default static data
     let displayData: any[] = [];
     let totalExpenses = 0;
-    let timeRange = "Last 30 days";
 
     if (data && data.Rows && data.Rows.Row) {
         const rows = data.Rows.Row;
@@ -90,7 +100,7 @@ export const ExpensesCard = ({ data }: { data?: any }) => {
         }
 
         if (data.Header && data.Header.TimePeriod) {
-            timeRange = data.Header.TimePeriod;
+            // No longer using timeRange variable
         }
     }
 
@@ -103,13 +113,13 @@ export const ExpensesCard = ({ data }: { data?: any }) => {
                 <div>
                     <CardTitle className="text-[12px] font-bold text-gray-700 uppercase tracking-wide">EXPENSES</CardTitle>
                 </div>
-                <div className="flex items-center gap-1 text-[11px] text-gray-500 font-medium">
-                    {timeRange} <ChevronDown className="w-4 h-4" />
-                </div>
+                {onPeriodChange && (
+                    <PeriodSelector currentPeriod={period} onPeriodChange={onPeriodChange} />
+                )}
             </CardHeader>
             <CardContent>
                 <div className="space-y-1">
-                    <div className="text-[12px] text-gray-500">Spending for {timeRange.toLowerCase()}</div>
+                    <div className="text-[12px] text-gray-500">Spending for {PERIODS[period].toLowerCase()}</div>
                     <div className="text-3xl font-bold font-sans tracking-tight text-gray-900">${totalExpenses.toLocaleString()}</div>
                 </div>
 

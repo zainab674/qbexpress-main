@@ -33,6 +33,13 @@ interface Shortcut {
     groupName: string;
 }
 
+interface GroupData {
+    name: string;
+    fullPath: string;
+    shortcuts: Shortcut[];
+    subfolders: Record<string, GroupData>;
+}
+
 const ShortcutItem = ({ shortcut, onDelete }: { shortcut: Shortcut; onDelete: (id: string) => void }) => {
     // Try to get favicon
     const getFavicon = (url: string) => {
@@ -88,7 +95,7 @@ export const ShortcutsGrid = () => {
         groupName: "General"
     });
     const [isCreatingNewGroup, setIsCreatingNewGroup] = useState(false);
-    const [expandedGroups, setExpandedGroups] = useState<string[]>([]);
+    const [expandedGroups, setExpandedGroups] = useState<string[]>(["General", "Finance", "Communication"]);
 
     const toggleGroup = (groupName: string) => {
         setExpandedGroups(prev =>
@@ -167,16 +174,97 @@ export const ShortcutsGrid = () => {
         }
     };
 
-    const groups = shortcuts.reduce((acc, curr) => {
-        const group = curr.groupName || 'General';
-        if (!acc[group]) acc[group] = [];
-        acc[group].push(curr);
-        return acc;
-    }, {} as Record<string, Shortcut[]>);
+    const buildTree = (shortcuts: Shortcut[]): Record<string, GroupData> => {
+        // Initialize with default folders
+        const tree: Record<string, GroupData> = {
+            "General": { name: "General", fullPath: "General", shortcuts: [], subfolders: {} },
+            "Finance": {
+                name: "Finance",
+                fullPath: "Finance",
+                shortcuts: [],
+                subfolders: {
+                    "Banks": { name: "Banks", fullPath: "Finance/Banks", shortcuts: [], subfolders: {} }
+                }
+            },
+            "Communication": { name: "Communication", fullPath: "Communication", shortcuts: [], subfolders: {} }
+        };
 
-    Object.keys(groups).forEach(key => {
-        groups[key].sort((a, b) => a.name.localeCompare(b.name));
-    });
+        shortcuts.forEach(s => {
+            const path = (s.groupName || "General").split('/');
+            let currentLevel = tree;
+            let currentPath = "";
+
+            path.forEach((part, index) => {
+                currentPath = currentPath ? `${currentPath}/${part}` : part;
+                if (!currentLevel[part]) {
+                    currentLevel[part] = { name: part, fullPath: currentPath, shortcuts: [], subfolders: {} };
+                }
+
+                if (index === path.length - 1) {
+                    currentLevel[part].shortcuts.push(s);
+                }
+                currentLevel = currentLevel[part].subfolders;
+            });
+        });
+
+        return tree;
+    };
+
+    const tree = buildTree(shortcuts);
+
+    const FolderView = ({ group, depth = 0 }: { group: GroupData, depth?: number }) => {
+        const isExpanded = expandedGroups.includes(group.fullPath);
+        const hasContent = group.shortcuts.length > 0 || Object.keys(group.subfolders).length > 0;
+
+        if (!hasContent && !["General", "Finance", "Communication", "Finance/Banks"].includes(group.fullPath)) {
+            return null;
+        }
+
+        return (
+            <div className={cn(
+                "space-y-4 border border-slate-100 rounded-xl p-4 hover:border-slate-200 transition-colors bg-white/50",
+                depth > 0 && "ml-6 border-l-2 border-slate-50"
+            )}>
+                <div
+                    className="flex items-center gap-2 text-sm font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none group/header"
+                    onClick={() => toggleGroup(group.fullPath)}
+                >
+                    {isExpanded ? <ChevronDown className="w-4 h-4 text-primary" /> : <ChevronRight className="w-4 h-4" />}
+                    <Folder className="w-4 h-4 text-slate-400 group-hover/header:text-primary transition-colors" />
+                    {group.name}
+                    <div className="h-px bg-slate-100 flex-grow mx-2" />
+                    {(group.shortcuts.length > 0 || !isExpanded) && (
+                        <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded-full text-slate-400">
+                            {group.shortcuts.length}
+                        </span>
+                    )}
+                </div>
+
+                {isExpanded && (
+                    <div className="space-y-4 pt-2 animate-in fade-in slide-in-from-top-2 duration-200">
+                        {group.shortcuts.length > 0 && (
+                            <div className="flex flex-wrap gap-4">
+                                {group.shortcuts.sort((a, b) => a.name.localeCompare(b.name)).map((shortcut) => (
+                                    <ShortcutItem
+                                        key={shortcut._id}
+                                        shortcut={shortcut}
+                                        onDelete={handleDelete}
+                                    />
+                                ))}
+                            </div>
+                        )}
+                        {Object.values(group.subfolders).length > 0 && (
+                            <div className="space-y-4">
+                                {Object.values(group.subfolders).map(sub => (
+                                    <FolderView key={sub.fullPath} group={sub} depth={depth + 1} />
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     if (isLoading && shortcuts.length === 0) return null;
 
@@ -262,11 +350,14 @@ export const ShortcutsGrid = () => {
                                                 </SelectTrigger>
                                                 <SelectContent className="rounded-xl shadow-xl border-slate-100">
                                                     <SelectItem value="General" className="py-3 px-6 text-lg">General</SelectItem>
+                                                    <SelectItem value="Finance" className="py-3 px-6 text-lg">Finance</SelectItem>
+                                                    <SelectItem value="Finance/Banks" className="py-3 px-6 text-lg">Finance / Banks</SelectItem>
+                                                    <SelectItem value="Communication" className="py-3 px-6 text-lg">Communication</SelectItem>
                                                     {Array.from(new Set(shortcuts.map(s => s.groupName)))
-                                                        .filter(group => group && group !== "General")
+                                                        .filter(group => group && !["General", "Finance", "Finance/Banks", "Communication"].includes(group))
                                                         .map(group => (
                                                             <SelectItem key={group} value={group} className="py-3 px-6 text-lg">
-                                                                {group}
+                                                                {group.replace(/\//g, ' / ')}
                                                             </SelectItem>
                                                         ))
                                                     }
@@ -290,44 +381,10 @@ export const ShortcutsGrid = () => {
                 </Dialog>
             </div>
 
-            {Object.keys(groups).length === 0 && !isLoading && (
-                <div className="text-center py-12 border-2 border-dashed border-slate-200 rounded-2xl bg-slate-50/50">
-                    <p className="text-lg text-slate-500">No shortcuts yet. Add your first one to get started!</p>
-                </div>
-            )}
-
             <div className="grid gap-4">
-                {Object.entries(groups).map(([groupName, groupShortcuts]) => {
-                    const isExpanded = expandedGroups.includes(groupName);
-                    return (
-                        <div key={groupName} className="space-y-4 border border-slate-100 rounded-xl p-4 hover:border-slate-200 transition-colors bg-white/50">
-                            <div
-                                className="flex items-center gap-2 text-sm font-semibold text-slate-500 uppercase tracking-wider cursor-pointer select-none group/header"
-                                onClick={() => toggleGroup(groupName)}
-                            >
-                                {isExpanded ? <ChevronDown className="w-4 h-4 text-primary" /> : <ChevronRight className="w-4 h-4" />}
-                                <Folder className="w-4 h-4 text-slate-400 group-hover/header:text-primary transition-colors" />
-                                {groupName}
-                                <div className="h-px bg-slate-100 flex-grow mx-2" />
-                                <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded-full text-slate-400">
-                                    {groupShortcuts.length}
-                                </span>
-                            </div>
-
-                            {isExpanded && (
-                                <div className="flex flex-wrap gap-4 pt-2 animate-in fade-in slide-in-from-top-2 duration-200">
-                                    {groupShortcuts.map((shortcut) => (
-                                        <ShortcutItem
-                                            key={shortcut._id}
-                                            shortcut={shortcut}
-                                            onDelete={handleDelete}
-                                        />
-                                    ))}
-                                </div>
-                            )}
-                        </div>
-                    );
-                })}
+                {Object.values(tree).map((group) => (
+                    <FolderView key={group.fullPath} group={group} />
+                ))}
             </div>
         </div>
     );

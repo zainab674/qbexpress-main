@@ -24,5 +24,14 @@ export const API_ENDPOINTS = {
     AUTH: `${API_BASE_URL}/api/quickbooks/auth`,
     STATUS: `${API_BASE_URL}/api/quickbooks/status`,
     OVERVIEW: `${API_BASE_URL}/api/quickbooks/business-overview`,
+    REPORTS: `${API_BASE_URL}/api/quickbooks/reports`,
+    ACCOUNTS: `${API_BASE_URL}/api/quickbooks/accounts`,
+    CUSTOMERS: `${API_BASE_URL}/api/quickbooks/customers`,
+    VENDORS: `${API_BASE_URL}/api/quickbooks/vendors`,
+    COMPANY_INFO: `${API_BASE_URL}/api/quickbooks/company-info`,
+    DASHBOARD: {
+      CUSTOMER_STATUS: `${API_BASE_URL}/api/quickbooks/dashboard/customer-status`,
+      VENDOR_STATUS: `${API_BASE_URL}/api/quickbooks/dashboard/vendor-status`,
+    },
   },
 } as const;

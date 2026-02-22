@@ -8,20 +8,23 @@ interface Account {
     AccountType: string;
     AccountSubType: string;
     qboBalance: number;
+    CurrentBalance?: number;
     unmatchedCount?: number;
 }
 
 export const AccountDetailsCard = ({ accounts }: { accounts: Account[] }) => {
     const navigate = useNavigate();
 
-    // Filter to show interesting accounts (e.g., non-bank Assets, Liabilities)
-    // or just show a high-level summary. 
-    // Let's show a categorized list.
-    const assets = accounts.filter(a => a.AccountType === 'Other Current Asset' || a.AccountType === 'Fixed Asset');
-    const liabilities = accounts.filter(a => a.AccountType === 'Credit Card' || a.AccountType === 'Other Current Liability' || a.AccountType === 'Long Term Liability');
+    // Filter to show interesting accounts
+    const assets = accounts.filter(a =>
+        ['Bank', 'Other Current Asset', 'Fixed Asset', 'Accounts Receivable', 'Asset', 'Other Asset'].includes(a.AccountType)
+    );
+    const liabilities = accounts.filter(a =>
+        ['Credit Card', 'Other Current Liability', 'Long Term Liability', 'Accounts Payable', 'Liability'].includes(a.AccountType)
+    );
 
-    const totalAssets = assets.reduce((sum, a) => sum + a.qboBalance, 0);
-    const totalLiabilities = liabilities.reduce((sum, a) => sum + a.qboBalance, 0);
+    const totalAssets = assets.reduce((sum, a) => sum + (a.CurrentBalance || a.qboBalance || 0), 0);
+    const totalLiabilities = liabilities.reduce((sum, a) => sum + (a.CurrentBalance || a.qboBalance || 0), 0);
 
     return (
         <Card
@@ -52,8 +55,8 @@ export const AccountDetailsCard = ({ accounts }: { accounts: Account[] }) => {
                                 <span className="font-medium text-gray-800 truncate max-w-[150px]">{acc.Name}</span>
                                 <span className="text-[10px] text-gray-500">{acc.AccountType}</span>
                             </div>
-                            <span className={acc.qboBalance < 0 ? "text-red-600 font-medium" : "text-gray-900 font-medium"}>
-                                ${acc.qboBalance.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                            <span className={(acc.CurrentBalance || acc.qboBalance || 0) < 0 ? "text-red-600 font-medium" : "text-gray-900 font-medium"}>
+                                ${(acc.CurrentBalance || acc.qboBalance || 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
                             </span>
                         </div>
                     ))}

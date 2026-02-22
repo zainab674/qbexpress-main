@@ -9,14 +9,26 @@ import {
     Tooltip
 } from "recharts";
 
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
+
 interface AgingCardProps {
     title: string;
     data?: any;
     type: 'AP' | 'AR';
+    period?: PeriodKey;
+    onPeriodChange?: (period: PeriodKey) => void;
     onViewDetail?: () => void;
 }
 
-export const AgingCard = ({ title, data, type, onViewDetail }: AgingCardProps) => {
+export const AgingCard = ({
+    title,
+    data,
+    type,
+    period = 'today',
+    onPeriodChange,
+    onViewDetail
+}: AgingCardProps) => {
     let total = 0;
 
     // Default empty segments to ensure all 5 are shown as in screenshot
@@ -154,7 +166,13 @@ export const AgingCard = ({ title, data, type, onViewDetail }: AgingCardProps) =
         >
             <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1">
                 <CardTitle className="text-[13px] font-bold text-gray-700 uppercase tracking-tight">{title}</CardTitle>
-                <div className="text-[11px] text-gray-400 font-medium">As of today</div>
+                {onPeriodChange && (
+                    <PeriodSelector
+                        currentPeriod={period}
+                        onPeriodChange={onPeriodChange}
+                        availablePeriods={['today', 'lastMonth', 'lastQuarter', 'lastYear']}
+                    />
+                )}
             </CardHeader>
             <CardContent>
                 <div className="mb-4">

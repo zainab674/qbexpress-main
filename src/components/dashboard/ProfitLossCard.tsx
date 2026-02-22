@@ -2,24 +2,33 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useNavigate } from "react-router-dom";
 import { ArrowUpRight, ArrowDownRight, Info, MoreVertical, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { PeriodKey, PERIODS } from "@/lib/date-utils";
+import { PeriodSelector } from "./PeriodSelector";
 
-export const ProfitLossCard = ({ data }: { data?: any }) => {
+export const ProfitLossCard = ({
+    data,
+    period = 'last30Days',
+    onPeriodChange
+}: {
+    data?: any;
+    period?: PeriodKey;
+    onPeriodChange?: (period: PeriodKey) => void;
+}) => {
     const navigate = useNavigate();
 
     // Default values
     let income = 0;
     let expenses = 0;
     let netIncome = 0;
-    let dateRange = "Last 30 days";
-    let trend = 0; // Derived trend
     let incomeToReview = 0;
     let expensesToReview = 0;
+    let trend = 0;
 
     if (data && data.Rows && data.Rows.Row) {
+        // ... (data extraction logic remains same)
         const rows = data.Rows.Row;
         const columns = data.Columns.Column;
 
-        // Find the index of the "Total" column
         const totalIdx = columns.findIndex((c: any) => c.ColTitle === "Total" || (c.MetaData && c.MetaData.some((m: any) => m.Value === "total")));
         const finalIdx = totalIdx !== -1 ? totalIdx : columns.length - 1;
 
@@ -47,12 +56,6 @@ export const ProfitLossCard = ({ data }: { data?: any }) => {
         } else {
             netIncome = income - expenses;
         }
-
-        if (data.Header && data.Header.TimePeriod) {
-            dateRange = data.Header.TimePeriod;
-        } else if (data.Header && data.Header.StartPeriod && data.Header.EndPeriod) {
-            dateRange = "Custom Period";
-        }
     }
 
     const netIncomePercent = income > 0 ? Math.round((netIncome / income) * 100) : 0;
@@ -66,13 +69,13 @@ export const ProfitLossCard = ({ data }: { data?: any }) => {
                 <div>
                     <CardTitle className="text-[12px] font-bold text-gray-700 uppercase tracking-wide">PROFIT & LOSS</CardTitle>
                 </div>
-                <div className="flex items-center gap-1 text-[11px] text-gray-500 font-medium">
-                    {dateRange} <ChevronDown className="w-4 h-4" />
-                </div>
+                {onPeriodChange && (
+                    <PeriodSelector currentPeriod={period} onPeriodChange={onPeriodChange} />
+                )}
             </CardHeader>
             <CardContent>
                 <div className="space-y-1">
-                    <div className="text-[12px] text-gray-500">Net profit for {dateRange.toLowerCase()}</div>
+                    <div className="text-[12px] text-gray-500">Net profit for {PERIODS[period].toLowerCase()}</div>
                     <div className="flex items-center gap-2">
                         <div className="text-3xl font-bold font-sans tracking-tight text-gray-900">${netIncome.toLocaleString()}</div>
                         <div className="bg-blue-50 text-blue-700 rounded-full px-2 py-0.5 text-[11px] font-bold flex items-center gap-1 leading-none h-5">
