@@ -263,10 +263,7 @@ export const CashFlowCard = ({
                     )}
                 </div>
 
-                <div className="mt-8 pt-4 border-t border-gray-100 flex items-center justify-between group-hover:opacity-100 transition-opacity">
-                    <span className="text-[12px] font-bold text-[#146EB4] hover:underline cursor-pointer">View cash flow</span>
-                    <MoreVertical className="w-4 h-4 text-gray-400 cursor-pointer" />
-                </div>
+
             </CardContent>
         </Card>
     );

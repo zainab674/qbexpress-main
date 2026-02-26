@@ -8,7 +8,10 @@ const User = require('./models/User');
 const ClientIntake = require('./models/ClientIntake');
 const Report = require('./models/Report');
 const Shortcut = require('./models/Shortcut');
+const ShortcutGroup = require('./models/ShortcutGroup');
 const Contact = require('./models/Contact');
+const Document = require('./models/Document');
+const DocumentGroup = require('./models/DocumentGroup');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
@@ -91,7 +94,16 @@ app.post('/api/shortcuts', async (req, res) => {
 app.get('/api/shortcuts/:userId', async (req, res) => {
     try {
         const { userId } = req.params;
-        const shortcuts = await Shortcut.find({ userId }).sort({ groupName: 1 });
+        let shortcuts = await Shortcut.find({ userId }).sort({ groupName: 1 });
+
+        if (shortcuts.length === 0) {
+            const defaults = [
+                { userId, name: 'Email', url: 'https://mail.google.com', groupName: 'Communication' },
+                { userId, name: 'WhatsApp', url: 'https://web.whatsapp.com', groupName: 'Communication' }
+            ];
+            shortcuts = await Shortcut.insertMany(defaults);
+        }
+
         res.json(shortcuts);
     } catch (error) {
         console.error('Fetch shortcuts error:', error);
@@ -109,10 +121,159 @@ app.delete('/api/shortcuts/:id', async (req, res) => {
     }
 });
 
+// 3b. Shortcut Groups (Folders)
+app.get('/api/shortcut-groups/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        let groups = await ShortcutGroup.find({ userId });
+        const shortcuts = await Shortcut.find({ userId }).select('groupName');
+
+        const shortcutGroupNames = [...new Set(shortcuts.map(s => s.groupName || 'General'))];
+        const existingPaths = new Set(groups.map(g => g.fullPath));
+
+        // Add missing shortcut group names to the result
+        shortcutGroupNames.forEach(path => {
+            if (!existingPaths.has(path)) {
+                groups.push({
+                    userId,
+                    name: path.split('/').pop(),
+                    fullPath: path,
+                    isDefault: false,
+                    _id: 'derived-' + Math.random().toString(36).substr(2, 9) // Temporary ID for frontend
+                });
+                existingPaths.add(path);
+            }
+        });
+
+        // Initialize defaults if absolutely no groups or shortcuts exist
+        if (groups.length === 0) {
+            const defaults = [
+                { userId, name: 'General', fullPath: 'General', isDefault: true },
+                { userId, name: 'Finance', fullPath: 'Finance', isDefault: true },
+                { userId, name: 'Banks', fullPath: 'Finance/Banks', isDefault: true },
+                { userId, name: 'Communication', fullPath: 'Communication', isDefault: true }
+            ];
+            groups = await ShortcutGroup.insertMany(defaults);
+        }
+
+        // Sort groups by path for better dropdown experience
+        groups.sort((a, b) => a.fullPath.localeCompare(b.fullPath));
+
+        res.json(groups);
+    } catch (error) {
+        console.error('Fetch shortcut groups error:', error);
+        res.status(500).json({ message: 'Error fetching shortcut groups', error: error.message });
+    }
+});
+
+app.post('/api/shortcut-groups', async (req, res) => {
+    try {
+        const { userId, name, fullPath } = req.body;
+        if (!userId || !name || !fullPath) {
+            return res.status(400).json({ message: 'Missing required fields' });
+        }
+
+        // Check if group already exists
+        const existing = await ShortcutGroup.findOne({ userId, fullPath });
+        if (existing) return res.json(existing);
+
+        const group = new ShortcutGroup({ userId, name, fullPath });
+        await group.save();
+        res.status(201).json(group);
+    } catch (error) {
+        console.error('Shortcut group save error:', error);
+        res.status(500).json({ message: 'Error saving shortcut group', error: error.message });
+    }
+});
+
+app.delete('/api/shortcut-groups/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { path } = req.query;
+        if (!userId || !path) {
+            return res.status(400).json({ message: 'Missing userId or path' });
+        }
+
+        // 1. Delete the groups (itself and subfolders)
+        const pathRegex = new RegExp('^' + path.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '(/|$)');
+        await ShortcutGroup.deleteMany({ userId, fullPath: { $regex: pathRegex } });
+
+        // 2. Delete the shortcuts inside
+        await Shortcut.deleteMany({ userId, groupName: { $regex: pathRegex } });
+
+        res.json({ message: 'Shortcut group and contents deleted' });
+    } catch (error) {
+        console.error('Delete shortcut group error:', error);
+        res.status(500).json({ message: 'Error deleting shortcut group', error: error.message });
+    }
+});
+
+app.patch('/api/shortcuts/:id', async (req, res) => {
+    try {
+        const { name, url, groupName } = req.body;
+        const updated = await Shortcut.findByIdAndUpdate(
+            req.params.id,
+            { name, url, groupName },
+            { new: true }
+        );
+        res.json(updated);
+    } catch (error) {
+        console.error('Update shortcut error:', error);
+        res.status(500).json({ message: 'Error updating shortcut', error: error.message });
+    }
+});
+
+app.patch('/api/shortcut-groups/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { oldPath, newPath } = req.body;
+
+        if (!oldPath || !newPath) {
+            return res.status(400).json({ message: 'Missing oldPath or newPath' });
+        }
+
+        // 1. Update the group itself (if it exists in DB)
+        const group = await ShortcutGroup.findOne({ userId, fullPath: oldPath });
+        if (group) {
+            group.name = newPath.split('/').pop();
+            group.fullPath = newPath;
+            await group.save();
+        }
+
+        // 2. Update all subfolders
+        const subfolders = await ShortcutGroup.find({
+            userId,
+            fullPath: { $regex: new RegExp('^' + oldPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '/') }
+        });
+
+        for (const sub of subfolders) {
+            sub.fullPath = sub.fullPath.replace(oldPath, newPath);
+            await sub.save();
+        }
+
+        // 3. Update all shortcuts
+        const shortcuts = await Shortcut.find({
+            userId,
+            groupName: { $regex: new RegExp('^' + oldPath.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '(/|$)') }
+        });
+
+        for (const s of shortcuts) {
+            s.groupName = s.groupName.replace(oldPath, newPath);
+            await s.save();
+        }
+
+        res.json({ message: 'Folder renamed successfully' });
+    } catch (error) {
+        console.error('Rename folder error:', error);
+        res.status(500).json({ message: 'Error renaming folder', error: error.message });
+    }
+});
+
+
 // 2. Signup
 app.post('/api/auth/signup', async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { email, password, name } = req.body;
 
         // Check if user exists
         const existingUser = await User.findOne({ email });
@@ -120,10 +281,10 @@ app.post('/api/auth/signup', async (req, res) => {
             return res.status(400).json({ message: 'User already exists' });
         }
 
-        const user = new User({ email, password });
+        const user = new User({ email, password, name });
         await user.save();
 
-        res.status(201).json({ message: 'User created successfully', user: { email: user.email, id: user._id } });
+        res.status(201).json({ message: 'User created successfully', user: { email: user.email, id: user._id, name: user.name, role: user.role } });
     } catch (error) {
         console.error('Signup error:', error);
         res.status(500).json({ message: 'Error creating user', error: error.message });
@@ -146,7 +307,17 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ message: 'Invalid credentials' });
         }
 
-        res.json({ message: 'Login successful', user: { email: user.email, id: user._id } });
+        res.json({
+            message: 'Login successful',
+            user: {
+                email: user.email,
+                id: user._id,
+                name: user.name,
+                company: user.company,
+                phone: user.phone,
+                role: user.role
+            }
+        });
     } catch (error) {
         console.error('Login error:', error);
         res.status(500).json({ message: 'Error logging in', error: error.message });
@@ -176,6 +347,270 @@ app.put('/api/users/:userId/widgets', async (req, res) => {
         res.json({ selectedWidgets: user.selectedWidgets });
     } catch (error) {
         res.status(500).json({ message: 'Error updating widgets', error: error.message });
+    }
+});
+
+// Admin: Get all users
+app.get('/api/users/all', async (req, res) => {
+    try {
+        const { adminId } = req.query;
+        if (!adminId) {
+            return res.status(400).json({ message: 'Admin ID required' });
+        }
+
+        const admin = await User.findById(adminId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+
+        const users = await User.find({}, '-password -qbAccessToken -qbRefreshToken'); // Exclude sensitive info
+        res.json(users);
+    } catch (error) {
+        console.error('Fetch all users error:', error);
+        res.status(500).json({ message: 'Error fetching users', error: error.message });
+    }
+});
+
+// Admin: Update user role
+app.patch('/api/users/:targetUserId/role', async (req, res) => {
+    try {
+        const { adminId } = req.query;
+        const { targetUserId } = req.params;
+        const { role } = req.body;
+
+        if (!adminId || !role) {
+            return res.status(400).json({ message: 'Admin ID and new role are required' });
+        }
+
+        const admin = await User.findById(adminId);
+        if (!admin || admin.role !== 'admin') {
+            return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+        }
+
+        const user = await User.findByIdAndUpdate(
+            targetUserId,
+            { role: role.toLowerCase() },
+            { new: true }
+        );
+
+        if (!user) return res.status(404).json({ message: 'User not found' });
+
+        res.json({ message: 'User role updated', user: { email: user.email, role: user.role } });
+    } catch (error) {
+        console.error('Update user role error:', error);
+        res.status(500).json({ message: 'Error updating user role', error: error.message });
+    }
+});
+
+// Admin/User: Upload document
+app.post('/api/documents/upload', async (req, res) => {
+    try {
+        const { adminId } = req.query; // Admin is performing upload
+        const { userId, name, category, fileData, fileType } = req.body;
+
+        if (!userId || !name || !category || !fileData || !fileType) {
+            return res.status(400).json({ message: 'All fields are required' });
+        }
+
+        // If adminId is provided, verify admin privileges
+        let uploadedBy = 'user';
+        let adminCategory = '[Sent to Admin]';
+        let userCategory = category;
+
+        if (adminId) {
+            const admin = await User.findById(adminId);
+            if (!admin || admin.role !== 'admin') {
+                return res.status(403).json({ message: 'Access denied. Admin privileges required.' });
+            }
+            uploadedBy = 'admin';
+            adminCategory = category; // Original categorization by admin
+        } else {
+            // User upload: specifically to admin
+            adminCategory = '[Sent to Admin]';
+            userCategory = '[Sent to Admin]';
+        }
+
+        const document = new Document({
+            userId,
+            name,
+            category: userCategory,
+            adminCategory,
+            uploadedBy,
+            fileData,
+            fileType
+        });
+
+        await document.save();
+        res.status(201).json({ message: 'Document uploaded successfully', document: { _id: document._id, name: document.name } });
+    } catch (error) {
+        console.error('Document upload error:', error);
+        res.status(500).json({ message: 'Error uploading document', error: error.message });
+    }
+});
+
+// Admin/User: Get documents for a user
+app.get('/api/documents/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const documents = await Document.find({ userId }, '-fileData'); // Exclude fileData for list
+        res.json(documents);
+    } catch (error) {
+        console.error('Fetch documents error:', error);
+        res.status(500).json({ message: 'Error fetching documents', error: error.message });
+    }
+});
+
+// Admin/User: Get specific document with data
+app.get('/api/documents/download/:docId', async (req, res) => {
+    try {
+        const { docId } = req.params;
+        const document = await Document.findById(docId);
+        if (!document) return res.status(404).json({ message: 'Document not found' });
+        res.json(document);
+    } catch (error) {
+        console.error('Download document error:', error);
+        res.status(500).json({ message: 'Error downloading document', error: error.message });
+    }
+});
+
+// Admin/User: Update document category (move to folder)
+app.patch('/api/documents/:docId/category', async (req, res) => {
+    try {
+        const { docId } = req.params;
+        const { category, scope = 'user' } = req.body; // scope: 'user' or 'admin'
+
+        if (!category) {
+            return res.status(400).json({ message: 'Category is required' });
+        }
+
+        const updateData = scope === 'admin'
+            ? { adminCategory: category }
+            : { category: category };
+
+        const document = await Document.findByIdAndUpdate(
+            docId,
+            updateData,
+            { new: true }
+        );
+
+        if (!document) return res.status(404).json({ message: 'Document not found' });
+
+        res.json({ message: 'Document reorganized successfully', document });
+    } catch (error) {
+        console.error('Update document category error:', error);
+        res.status(500).json({ message: 'Error updating document category', error: error.message });
+    }
+});
+
+// Admin/User: Bulk rename category (Rename Folder)
+app.patch('/api/documents/category/rename', async (req, res) => {
+    try {
+        const { userId, oldCategory, newCategory, scope = 'user' } = req.body;
+
+        if (!userId || !oldCategory || !newCategory) {
+            return res.status(400).json({ message: 'userId, oldCategory, and newCategory are required' });
+        }
+
+        const filter = scope === 'admin'
+            ? { userId, adminCategory: oldCategory }
+            : { userId, category: oldCategory };
+
+        const update = scope === 'admin'
+            ? { adminCategory: newCategory }
+            : { category: newCategory };
+
+        const result = await Document.updateMany(filter, update);
+
+        res.json({
+            message: 'Folder renamed successfully',
+            modifiedCount: result.modifiedCount
+        });
+    } catch (error) {
+        console.error('Bulk rename category error:', error);
+        res.status(500).json({ message: 'Error renaming folder', error: error.message });
+    }
+});
+
+// Admin/User: Document Groups (Persistent Folders)
+app.get('/api/document-groups/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { scope = 'user' } = req.query;
+        const groups = await DocumentGroup.find({ userId, scope });
+        res.json(groups);
+    } catch (error) {
+        console.error('Fetch document groups error:', error);
+        res.status(500).json({ message: 'Error fetching document groups', error: error.message });
+    }
+});
+
+app.post('/api/document-groups', async (req, res) => {
+    try {
+        const { userId, name, fullPath, scope = 'user' } = req.body;
+        if (!userId || !name || !fullPath) {
+            return res.status(400).json({ message: 'Missing required fields' });
+        }
+
+        // Check if group already exists
+        const existing = await DocumentGroup.findOne({ userId, fullPath, scope });
+        if (existing) return res.json(existing);
+
+        const group = new DocumentGroup({ userId, name, fullPath, scope });
+        await group.save();
+        res.status(201).json(group);
+    } catch (error) {
+        console.error('Document group save error:', error);
+        res.status(500).json({ message: 'Error saving document group', error: error.message });
+    }
+});
+
+app.delete('/api/document-groups/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        const { path, scope = 'user' } = req.query;
+        if (!userId || !path) {
+            return res.status(400).json({ message: 'Missing userId or path' });
+        }
+
+        // Delete the group
+        await DocumentGroup.deleteOne({ userId, fullPath: path, scope });
+
+        // Note: We don't delete documents, they just become uncategorized if they matched this path
+        // But our UI logic handles "uncategorized" as fallback.
+        // If we wanted to bulk update documents to "uncategorized", we could do updateMany here.
+        const filter = scope === 'admin' ? { userId, adminCategory: path } : { userId, category: path };
+        const update = scope === 'admin' ? { adminCategory: 'uncategorized' } : { category: 'uncategorized' };
+        await Document.updateMany(filter, update);
+
+        res.json({ message: 'Document group deleted' });
+    } catch (error) {
+        console.error('Delete document group error:', error);
+        res.status(500).json({ message: 'Error deleting document group', error: error.message });
+    }
+});
+
+app.patch('/api/document-groups/rename', async (req, res) => {
+    try {
+        const { userId, oldCategory, newCategory, scope = 'user' } = req.body;
+        if (!userId || !oldCategory || !newCategory) {
+            return res.status(400).json({ message: 'userId, oldCategory, and newCategory are required' });
+        }
+
+        // 1. Update the group record if it exists
+        await DocumentGroup.findOneAndUpdate(
+            { userId, fullPath: oldCategory, scope },
+            { name: newCategory, fullPath: newCategory }
+        );
+
+        // 2. Update all documents in this category
+        const filter = scope === 'admin' ? { userId, adminCategory: oldCategory } : { userId, category: oldCategory };
+        const update = scope === 'admin' ? { adminCategory: newCategory } : { category: newCategory };
+        await Document.updateMany(filter, update);
+
+        res.json({ message: 'Folder and documents renamed successfully' });
+    } catch (error) {
+        console.error('Rename document group error:', error);
+        res.status(500).json({ message: 'Error renaming folder', error: error.message });
     }
 });
 

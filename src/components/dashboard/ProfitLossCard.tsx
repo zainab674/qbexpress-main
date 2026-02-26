@@ -122,10 +122,7 @@ export const ProfitLossCard = ({
                     </div>
                 </div>
 
-                <div className="mt-8 flex items-center justify-between border-t pt-4">
-                    <div className="text-sm text-blue-600 font-medium">Categorize 22 transactions</div>
-                    <MoreVertical className="w-4 h-4 text-gray-400" />
-                </div>
+
             </CardContent>
         </Card>
     );

@@ -162,10 +162,7 @@ export const ExpensesCard = ({
                     </div>
                 </div>
 
-                <div className="mt-8 flex items-center justify-between border-t pt-4">
-                    <div className="text-sm text-blue-600 font-medium whitespace-nowrap overflow-hidden text-ellipsis">Review transactions</div>
-                    <MoreVertical className="w-4 h-4 text-gray-400" />
-                </div>
+
             </CardContent>
         </Card>
     );

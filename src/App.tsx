@@ -20,7 +20,9 @@ import Signup from "./pages/Signup";
 import ClientIntake from "./pages/ClientIntake";
 import ClientDashboard from "./pages/ClientDashboard";
 import DashboardDetail from "./pages/DashboardDetail";
+import AdminPanel from "./pages/AdminPanel";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import { AdminRoute } from "./components/AdminRoute";
 
 
 const queryClient = new QueryClient();
@@ -46,6 +48,11 @@ const App = () => (
             <ProtectedRoute>
               <DashboardDetail />
             </ProtectedRoute>
+          } />
+          <Route path="/admin" element={
+            <AdminRoute>
+              <AdminPanel />
+            </AdminRoute>
           } />
           <Route path="/" element={<Index />} />
 

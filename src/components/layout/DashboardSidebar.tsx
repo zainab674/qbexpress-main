@@ -15,7 +15,8 @@ import {
     X,
     Folder,
     Globe,
-    PlusCircle
+    PlusCircle,
+    Trash2
 } from "lucide-react";
 import {
     Dialog,
@@ -56,8 +57,10 @@ interface Shortcut {
 }
 
 interface GroupData {
+    _id?: string;
     name: string;
     fullPath: string;
+    isDefault?: boolean;
     shortcuts: Shortcut[];
     subfolders: Record<string, GroupData>;
 }
@@ -76,44 +79,38 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
     const [isReportsOpen, setIsReportsOpen] = useState(false);
     const [reports, setReports] = useState<Report[]>([]);
     const [shortcuts, setShortcuts] = useState<Shortcut[]>([]);
+    const [groups, setGroups] = useState<any[]>([]);
     const [isShortcutsOpen, setIsShortcutsOpen] = useState(true);
     const [expandedGroups, setExpandedGroups] = useState<string[]>(["General", "Finance", "Communication", "Finance/Banks"]);
     const [isAddShortcutOpen, setIsAddShortcutOpen] = useState(false);
     const [isCreatingNewGroup, setIsCreatingNewGroup] = useState(false);
     const [newShortcut, setNewShortcut] = useState({ name: "", url: "", groupName: "" });
 
-    const fetchReports = async () => {
+    const fetchDashboardData = async () => {
         const userStr = localStorage.getItem('qb_user');
         if (!userStr) return;
         const user = JSON.parse(userStr);
-        try {
-            const res = await fetch(`${API_ENDPOINTS.REPORTS}/${user.id}`);
-            if (res.ok) {
-                const data = await res.json();
-                setReports(data || []);
-            }
-        } catch (error) { console.error(error); }
-    };
 
-    const fetchShortcuts = async () => {
-        const userStr = localStorage.getItem('qb_user');
-        if (!userStr) return;
-        const user = JSON.parse(userStr);
         try {
-            const res = await fetch(`${API_ENDPOINTS.SHORTCUTS}/${user.id}`);
-            if (res.ok) {
-                const data = await res.json();
-                setShortcuts(data || []);
-                // Expand all groups by default
-                const groups = Array.from(new Set(data.map((s: Shortcut) => s.groupName || "General")));
-                setExpandedGroups(groups as string[]);
+            const [rRes, sRes, gRes] = await Promise.all([
+                fetch(`${API_ENDPOINTS.REPORTS}/${user.id}`),
+                fetch(`${API_ENDPOINTS.SHORTCUTS}/${user.id}`),
+                fetch(`${API_ENDPOINTS.SHORTCUT_GROUPS}/${user.id}`)
+            ]);
+
+            if (rRes.ok && sRes.ok && gRes.ok) {
+                const [rData, sData, gData] = await Promise.all([rRes.json(), sRes.json(), gRes.json()]);
+                setReports(rData);
+                setShortcuts(sData);
+                setGroups(gData);
             }
-        } catch (error) { console.error(error); }
+        } catch (error) {
+            console.error("Error fetching dashboard data:", error);
+        }
     };
 
     useEffect(() => {
-        fetchReports();
-        fetchShortcuts();
+        fetchDashboardData();
     }, []);
 
     const handleAddShortcut = async (e: React.FormEvent) => {
@@ -128,22 +125,39 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
         }
 
         try {
+            // 1. If creating a new group, save it first
+            if (isCreatingNewGroup && newShortcut.groupName) {
+                const gRes = await fetch(API_ENDPOINTS.SHORTCUT_GROUPS, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        userId: user.id,
+                        name: newShortcut.groupName.split('/').pop(),
+                        fullPath: newShortcut.groupName
+                    })
+                });
+                if (gRes.ok) {
+                    const newGroup = await gRes.json();
+                    setGroups(prev => [...prev.filter(g => g.fullPath !== newGroup.fullPath), newGroup]);
+                }
+            }
+
+            // 2. Save the shortcut
             const res = await fetch(API_ENDPOINTS.SHORTCUTS, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     ...newShortcut,
-                    url: finalUrl,
-                    userId: user.id,
-                    groupName: newShortcut.groupName || "General"
+                    userId: user.id
                 })
             });
-
             if (res.ok) {
-                toast.success("Shortcut added");
+                const data = await res.json();
+                setShortcuts([...shortcuts, data]);
                 setIsAddShortcutOpen(false);
-                setNewShortcut({ name: "", url: "", groupName: "" });
-                fetchShortcuts();
+                setIsCreatingNewGroup(false);
+                setNewShortcut({ name: "", url: "", groupName: "General" });
+                toast.success("Shortcut added");
             }
         } catch (error) {
             toast.error("Failed to add shortcut");
@@ -155,15 +169,50 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
         e.stopPropagation();
         try {
             const res = await fetch(`${API_ENDPOINTS.SHORTCUTS}/${id}`, {
-                method: 'DELETE'
+                method: "DELETE"
             });
             if (res.ok) {
-                toast.success("Shortcut removed");
                 setShortcuts(shortcuts.filter(s => s._id !== id));
+                toast.success("Shortcut deleted");
             }
         } catch (error) {
             toast.error("Failed to delete shortcut");
         }
+    };
+
+    const handleDeleteShortcutGroup = async (groupPath: string, e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const userStr = localStorage.getItem('qb_user');
+        if (!userStr) return;
+        const user = JSON.parse(userStr);
+
+        if (!confirm(`Are you sure you want to delete the folder "${groupPath}" and all its contents?`)) {
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API_ENDPOINTS.SHORTCUT_GROUPS}/${user.id}?path=${encodeURIComponent(groupPath)}`, {
+                method: "DELETE"
+            });
+            if (res.ok) {
+                setShortcuts(shortcuts.filter(s => !s.groupName.startsWith(groupPath)));
+                setGroups(prev => prev.filter(g => !g.fullPath.startsWith(groupPath)));
+                toast.success(`Folder "${groupPath}" deleted`);
+            }
+        } catch (error) {
+            console.error("Delete group error:", error);
+            toast.error("Failed to delete folder");
+        }
+    };
+
+    const handleAddShortcutInFolder = (groupPath: string, e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setNewShortcut({ ...newShortcut, groupName: groupPath });
+        setIsCreatingNewGroup(false);
+        setIsAddShortcutOpen(true);
     };
 
     const toggleGroup = (groupName: string) => {
@@ -175,35 +224,58 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
     };
 
     const buildTree = (shortcuts: Shortcut[]): Record<string, GroupData> => {
-        const tree: Record<string, GroupData> = {
-            "General": { name: "General", fullPath: "General", shortcuts: [], subfolders: {} },
-            "Finance": {
-                name: "Finance",
-                fullPath: "Finance",
-                shortcuts: [],
-                subfolders: {
-                    "Banks": { name: "Banks", fullPath: "Finance/Banks", shortcuts: [], subfolders: {} }
-                }
-            },
-            "Communication": { name: "Communication", fullPath: "Communication", shortcuts: [], subfolders: {} }
-        };
+        const tree: Record<string, GroupData> = {};
 
-        shortcuts.forEach(s => {
-            const path = (s.groupName || "General").split('/');
+        // Add groups from DB first
+        groups.forEach(g => {
+            const pathParts = g.fullPath.split('/');
+            let current = tree;
+
+            pathParts.forEach((part, index) => {
+                const currentPath = pathParts.slice(0, index + 1).join('/');
+                if (!current[part]) {
+                    current[part] = {
+                        name: part,
+                        fullPath: currentPath,
+                        shortcuts: [],
+                        subfolders: {}
+                    };
+                }
+
+                // If it's the last part, we can attach DB properties
+                if (index === pathParts.length - 1) {
+                    current[part]._id = g._id;
+                    current[part].isDefault = g.isDefault;
+                }
+
+                current = current[part].subfolders;
+            });
+        });
+
+        // Add shortcuts
+        shortcuts.forEach(shortcut => {
+            const groupPath = shortcut.groupName || 'General';
+            const pathParts = groupPath.split('/');
             let currentLevel = tree;
-            let currentPath = "";
+            let currentGroup: GroupData | null = null;
 
-            path.forEach((part, index) => {
-                currentPath = currentPath ? `${currentPath}/${part}` : part;
+            pathParts.forEach((part, index) => {
+                const currentPath = pathParts.slice(0, index + 1).join('/');
                 if (!currentLevel[part]) {
-                    currentLevel[part] = { name: part, fullPath: currentPath, shortcuts: [], subfolders: {} };
+                    currentLevel[part] = {
+                        name: part,
+                        fullPath: currentPath,
+                        shortcuts: [],
+                        subfolders: {}
+                    };
                 }
-
-                if (index === path.length - 1) {
-                    currentLevel[part].shortcuts.push(s);
-                }
+                currentGroup = currentLevel[part];
                 currentLevel = currentLevel[part].subfolders;
             });
+
+            if (currentGroup) {
+                currentGroup.shortcuts.push(shortcut);
+            }
         });
 
         return tree;
@@ -220,17 +292,46 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
         }
 
         return (
-            <div className="space-y-1">
-                <button
-                    onClick={() => toggleGroup(group.fullPath)}
+            <div className={cn(
+                "space-y-1 transition-all duration-300",
+                isExpanded && "bg-white/5 rounded-lg pb-2 pt-1"
+            )}>
+                <div
                     className={cn(
-                        "w-full flex items-center gap-2 py-2 text-xs font-bold text-white uppercase tracking-widest hover:text-white transition-colors",
+                        "group/folder w-full flex items-center justify-between py-2 text-xs font-bold uppercase tracking-widest transition-colors cursor-pointer",
+                        isExpanded ? "text-primary" : "text-white/70 hover:text-white",
                         depth === 0 ? "px-6" : `pl-${6 + (depth * 4)} pr-6`
                     )}
+                    onClick={() => toggleGroup(group.fullPath)}
                 >
-                    <ChevronDown size={12} className={cn("text-white transition-transform", !isExpanded && "-rotate-90")} />
-                    {group.name}
-                </button>
+                    <div className="flex items-center gap-2">
+                        <ChevronDown size={12} className={cn("text-white transition-transform", !isExpanded && "-rotate-90")} />
+                        {group.name}
+                    </div>
+
+                    <div className="flex items-center gap-1 opacity-0 group-hover/folder:opacity-100 transition-opacity">
+                        <button
+                            onClick={(e) => handleAddShortcutInFolder(group.fullPath, e)}
+                            className={cn(
+                                "p-1 transition-colors",
+                                isExpanded ? "text-primary/70 hover:text-primary" : "hover:text-blue-400"
+                            )}
+                            title="Add shortcut"
+                        >
+                            <PlusCircle size={12} />
+                        </button>
+                        <button
+                            onClick={(e) => handleDeleteShortcutGroup(group.fullPath, e)}
+                            className={cn(
+                                "p-1 transition-colors",
+                                isExpanded ? "text-primary/70 hover:text-red-400" : "hover:text-red-400"
+                            )}
+                            title="Delete folder"
+                        >
+                            <Trash2 size={12} />
+                        </button>
+                    </div>
+                </div>
 
                 {isExpanded && (
                     <div className="space-y-0.5">
@@ -325,7 +426,7 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
                                             const newOpenState = !isReportsOpen;
                                             setIsReportsOpen(newOpenState);
                                             if (newOpenState) {
-                                                fetchReports();
+                                                fetchDashboardData();
                                             }
                                         }}
                                         className={cn(
@@ -471,18 +572,11 @@ export const DashboardSidebar = ({ onReportSelect }: { onReportSelect?: (report:
                                                             <SelectValue placeholder="Select a group..." />
                                                         </SelectTrigger>
                                                         <SelectContent className="bg-[#2d2e33] border-white/10 text-white">
-                                                            <SelectItem value="General" className="py-3 px-6 text-lg">General</SelectItem>
-                                                            <SelectItem value="Finance" className="py-3 px-6 text-lg">Finance</SelectItem>
-                                                            <SelectItem value="Finance/Banks" className="py-3 px-6 text-lg">Finance / Banks</SelectItem>
-                                                            <SelectItem value="Communication" className="py-3 px-6 text-lg">Communication</SelectItem>
-                                                            {Array.from(new Set(shortcuts.map(s => s.groupName)))
-                                                                .filter(group => group && !["General", "Finance", "Finance/Banks", "Communication"].includes(group))
-                                                                .map(group => (
-                                                                    <SelectItem key={group} value={group} className="py-3 px-6 text-lg">
-                                                                        {group.replace(/\//g, ' / ')}
-                                                                    </SelectItem>
-                                                                ))
-                                                            }
+                                                            {groups.map(g => (
+                                                                <SelectItem key={g.fullPath} value={g.fullPath} className="py-3 px-6 text-lg">
+                                                                    {g.fullPath.replace(/\//g, ' / ')}
+                                                                </SelectItem>
+                                                            ))}
                                                         </SelectContent>
                                                     </Select>
                                                 )}

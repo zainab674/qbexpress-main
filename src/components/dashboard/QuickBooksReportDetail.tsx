@@ -90,16 +90,7 @@ export const QuickBooksReportDetail = ({ data, onBack }: QuickBooksReportDetailP
                     <ArrowLeft className="w-4 h-4" />
                     Back to Dashboard
                 </Button>
-                <div className="flex gap-2">
-                    <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11px] font-bold uppercase tracking-wider">
-                        <Printer className="w-3.5 h-3.5" />
-                        Print
-                    </Button>
-                    <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11px] font-bold uppercase tracking-wider">
-                        <Download className="w-3.5 h-3.5" />
-                        Export
-                    </Button>
-                </div>
+
             </div>
 
             <Card className="border-none shadow-xl shadow-blue-900/5 overflow-hidden ring-1 ring-gray-200/50">

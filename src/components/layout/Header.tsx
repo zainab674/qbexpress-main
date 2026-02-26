@@ -52,6 +52,7 @@ const Header = () => {
     { path: "/services", label: "Services" },
     { path: "/pricing", label: "Pricing" },
     ...(user ? [{ path: "/dashboard", label: "Dashboard" }] : []),
+    ...(user?.role === 'admin' ? [{ path: "/admin", label: "Admin Panel" }] : []),
     { path: "/reports", label: "Reports" },
     { path: "/enterprise", label: "Enterprise" },
     { path: "/payroll", label: "Payroll" },

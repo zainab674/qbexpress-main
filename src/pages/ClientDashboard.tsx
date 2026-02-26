@@ -22,6 +22,8 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle2, Link2, Plus } from "lucide-react";
 import { WidgetSelectionDialog } from "@/components/dashboard/WidgetSelectionDialog";
 import { PeriodKey, getDateRangeForPeriod } from "@/lib/date-utils";
+import UserDocumentsModal from "@/components/UserDocumentsModal";
+import { FileText } from "lucide-react";
 
 interface Report {
     _id: string;
@@ -40,6 +42,7 @@ const ClientDashboard = () => {
     const [qbData, setQbData] = useState<any>(null);
     const [selectedWidgets, setSelectedWidgets] = useState<string[]>([]);
     const [isWidgetDialogOpen, setIsWidgetDialogOpen] = useState(false);
+    const [isDocumentsModalOpen, setIsDocumentsModalOpen] = useState(false);
     const [widgetPeriods, setWidgetPeriods] = useState<Record<string, PeriodKey>>({
         profitAndLoss: 'last30Days',
         salesReport: 'thisYear',
@@ -229,6 +232,14 @@ const ClientDashboard = () => {
                         <Plus className="w-4 h-4" />
                         Add widgets
                     </Button>
+                    <Button
+                        onClick={() => setIsDocumentsModalOpen(true)}
+                        variant="ghost"
+                        className="gap-2 text-slate-600 hover:text-slate-900"
+                    >
+                        <FileText className="w-4 h-4" />
+                        Documents
+                    </Button>
                 </div>
             }
         >
@@ -394,6 +405,12 @@ const ClientDashboard = () => {
                 onClose={() => setIsWidgetDialogOpen(false)}
                 selectedWidgets={selectedWidgets}
                 onUpdate={setSelectedWidgets}
+                userId={JSON.parse(localStorage.getItem('qb_user') || '{}').id}
+            />
+
+            <UserDocumentsModal
+                isOpen={isDocumentsModalOpen}
+                onClose={() => setIsDocumentsModalOpen(false)}
                 userId={JSON.parse(localStorage.getItem('qb_user') || '{}').id}
             />
         </DashboardLayout>

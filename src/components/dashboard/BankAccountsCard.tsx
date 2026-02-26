@@ -108,15 +108,7 @@ export const BankAccountsCard = ({
                     ))}
                 </div>
             </CardContent>
-            <div className="mt-8 px-4 py-4 border-t flex items-center justify-between bg-gray-50/30 rounded-b-xl">
-                <div className="flex items-center gap-1 text-[13px] text-[#2ca01c] font-bold">
-                    Go to registers <ChevronDown className="w-4 h-4" />
-                </div>
-                <div className="flex items-center gap-3">
-                    <Settings className="w-4 h-4 text-gray-400 hover:text-gray-600 transition-colors" />
-                    <MoreVertical className="w-4 h-4 text-gray-400 hover:text-gray-600 transition-colors" />
-                </div>
-            </div>
+
         </Card>
     );
 };
